@@ -1,23 +1,23 @@
-### lotspeed zeta-tcp
+### lotspeed ml-tcp
 
 <div align=center>
-    <img src="https://github.com/uk0/lotspeed/blob/zeta-tcp/logo.png" width="400" height="400" />
+    <img src="https://github.com/uk0/lotspeed/blob/ml-tcp/logo.png" width="400" height="400" />
 </div>
 
 
 
 ### branch explanation
 
-* `zeta-tcp`: lotspeed zeta-tcp 版本([Appex Networking zeta-tcp](https://appexnetworks.com/wp-content/uploads/2024/02/ZetaTCP-Whitepaper-V2.0.pdf))
+* `ml-tcp`: lotspeed ml-tcp 基于学习历史记录的模式进行加速，并且洲际场景抖动不会降速避让。
 
 
 * auto install
 
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/zeta-tcp/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
 #   or
-wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/zeta-tcp/install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
 ```
 
 
@@ -72,7 +72,7 @@ root@racknerd-6bf1e7b:~# lotspeed
 
 
 <div align=center>
-    <img src="https://github.com/uk0/lotspeed/blob/zeta-tcp/zeta-tcp.png" width="1024" height="768" />
+    <img src="https://github.com/uk0/lotspeed/blob/ml-tcp/zeta-tcp.png" width="1024" height="768" />
 </div>
 
 
@@ -99,8 +99,7 @@ iperf3 -c green1 -p 35201 -R -t 30
 
 ✅ 基于“时延+丢包”混合驱动的拥塞控制
 ✅ 学习型状态机
-❌ 概率性丢包检测
-❌ 反向控制
+✅ 洲际场景适配
 
 
 PAC (Proactive ACK Control) for TCP Incast Congestion
@@ -109,24 +108,6 @@ PAC (Proactive ACK Control) for TCP Incast Congestion
 * https://github.com/uk0/TCP-Incast/tree/zeta-tcp 
 
 
----------------------------------------------
-
-### 最新版顶级思路[目前没有开源打算]
-
-* 基于时延和丢包的混合驱动拥塞控制
-* 学习型状态机
-* 概率性丢包检测
-* 反向控制
-* 跨流协同优化
-
-* 使用的服务器：
-  * cloudcone 
-  * Los Angeles, CA-DC1 
-  * [Ubuntu 24.04 - x86_64 — 74.48.174.xx]
-  * 北京500M联通，测试时间：2025-12-12 10:51:00
-
-
-![img_7.png](img/img_7.png)
 
 -----------------------------------
 

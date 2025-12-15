@@ -1,18 +1,18 @@
 #!/bin/bash
 #
-# LotSpeed v5.6 - Zeta-TCP Auto-Scaling Edition (UI Enhanced)
+# LotSpeed v5.6 - ml-tcp Auto-Scaling Edition (UI Enhanced)
 # Author: uk0 @ 2025-11-23
 # GitHub: https://github.com/uk0/lotspeed
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/zeta-tcp/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
 #
 
 set -e
 
 # ================= 配置区域 =================
 GITHUB_REPO="uk0/lotspeed"
-GITHUB_BRANCH="zeta-tcp"
+GITHUB_BRANCH="ml-tcp"
 INSTALL_DIR="/opt/lotspeed"
 MODULE_NAME="lotspeed"
 VERSION="5.6"
@@ -132,7 +132,7 @@ print_banner() {
 ║     |_____\___/ \__|____/| .__/ \___|\___|\__,_|                     ║
 ║                          |_|                                         ║
 ║                                                                      ║
-║               Zeta-TCP Auto-Scaling Edition                          ║
+║                 ML-TCP Auto-Scaling Edition                          ║
 ║                       Version 5.6rc                                  ║
 ╚══════════════════════════════════════════════════════════════════════╝
 EOF
@@ -444,7 +444,7 @@ get_default_congestion_control() {
 
 show_status() {
     print_box_top
-    print_box_row "LotSpeed v$VERSION Status (Zeta-TCP)" "center"
+    print_box_row "LotSpeed v$VERSION Status (ML-TCP)" "center"
     print_box_div
 
     # 检查模块状态
@@ -769,7 +769,7 @@ show_info() {
     echo ""
     print_box_top "${GREEN}"
     print_box_row "LotSpeed v$VERSION Installation Complete!" "center" "${GREEN}"
-    print_box_row "Zeta-TCP Auto-Scaling Edition" "center" "${GREEN}"
+    print_box_row "ML-TCP Auto-Scaling Edition" "center" "${GREEN}"
     print_box_bottom "${GREEN}"
 
     echo ""
