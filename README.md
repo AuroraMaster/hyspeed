@@ -50,21 +50,25 @@ dmesg -w
 * helper （lotserver_beta越小强的越凶，建议大雨620否则会导致CPU飙高）
 
 ```bash
-root@racknerd-6bf1e7b:~# lotspeed
-╔════════════════════════════════════════════════════════════════════╗
-║                      LotSpeed v5.6 Management                      ║
-╟────────────────────────────────────────────────────────────────────╢
-║ start                                               Start LotSpeed ║
-║ stop                                                 Stop LotSpeed ║
-║ restart                                           Restart LotSpeed ║
-║ status                                                Check Status ║
-║ preset [name]                                         Apply Config ║
-║ set [k] [v]                                          Set Parameter ║
-║ monitor                                                  Live Logs ║
-║ uninstall                                        Remove Completely ║
-╟────────────────────────────────────────────────────────────────────╢
-║ Presets: conservative, balanced                                    ║
-╚════════════════════════════════════════════════════════════════════╝
+
+#推荐参数值
+默认参数调整为更适合 130–200ms 洲际链路的激进配置（文件：lotspeed.c）：
+
+  - 高 RTT 判定 130ms (lotserver_high_rtt_us=130000)。
+  - 突刺/上调：probe_boost=130、probe_boost_highrtt=150、up_max=130。
+  - 下调底线更稳：down_min=92（健康高时仍会动态抬升）。
+  - RTT 压力阈值：rtt_pressure_low=110、rtt_pressure_high=170。
+  - 噪声丢包识别：loss_noise_pct=4、noise_window_hyst=3。
+  - 自调开启，周期 1500ms：lotserver_autotune=1、lotserver_tune_interval_ms=1500。
+  - 轻量 ML 默认开启，权重 health=2、rtt=1、loss=3、bias=0。
+
+  当前默认加载即使用上述值；仍可在运行时调整：
+
+  p=/sys/module/lotspeed/parameters
+  # 可按需覆盖
+  echo 120000 > $p/lotserver_high_rtt_us        # 如需更保守
+  echo 140     > $p/lotserver_up_max             # 如需更激进上调
+
 ```
 
 

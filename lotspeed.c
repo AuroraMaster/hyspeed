@@ -23,6 +23,9 @@
 #include <linux/spinlock.h>
 #include <linux/rculist.h>
 #include <linux/compiler.h>
+#include <linux/workqueue.h>
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
 
 // --- 安全性宏定义 ---
 #define SAFETY_CHECK(ptr, ret) do { \
@@ -72,13 +75,15 @@
 #define LOTSPEED_RATE_DOWN_HARD 90   // -10%
 #define LOTSPEED_SMOOTH_NUM 7        // EWMA numerator (7/10)
 #define LOTSPEED_SMOOTH_DEN 10
-#define LOTSPEED_PROBE_BOOST 112     // +12% burst probe
-#define LOTSPEED_PROBE_BOOST_HIGHRTT 120 // +20% for high RTT paths
-#define LOTSPEED_HIGH_RTT_US 150000   // >=150ms 视为洲际路径
-#define LOTSPEED_UP_MAX 120          // 动态上调上限 +20%
-#define LOTSPEED_DOWN_MIN 95         // 动态下调下限 -5%
-#define LOTSPEED_RTT_PRESSURE_LOW 120
-#define LOTSPEED_RTT_PRESSURE_HIGH 180
+#define LOTSPEED_DEF_PROBE_BOOST 112         // +12% burst probe
+#define LOTSPEED_DEF_PROBE_BOOST_HIGHRTT 120 // +20% for high RTT paths
+#define LOTSPEED_DEF_HIGH_RTT_US 150000      // >=150ms 视为洲际路径
+#define LOTSPEED_DEF_UP_MAX 120              // 动态上调上限 +20%
+#define LOTSPEED_DEF_DOWN_MIN 88             // 动态下调下限 -12%
+#define LOTSPEED_DEF_RTT_PRESSURE_LOW 120
+#define LOTSPEED_DEF_RTT_PRESSURE_HIGH 180
+#define LOTSPEED_DEF_LOSS_NOISE_PCT 3
+#define LOTSPEED_DEF_NOISE_WINDOW_HYST 2
 
 // --- BBR/LotSpeed 参数 ---
 #define LOTSPEED_BETA_SCALE 1024
@@ -110,6 +115,22 @@ static bool lotserver_adaptive = true;
 static bool lotserver_turbo = false;
 static bool lotserver_verbose = false;
 static bool lotserver_safe_mode = true;
+static bool lotserver_autotune = true;
+static unsigned int lotserver_tune_interval_ms = 1500;
+static unsigned int lotserver_high_rtt_us = 130000; // 130ms 起视为洲际/高RTT
+static unsigned int lotserver_probe_boost = 130;    // +30%
+static unsigned int lotserver_probe_boost_highrtt = 150; // +50%
+static unsigned int lotserver_up_max = 130;         // +30%
+static unsigned int lotserver_down_min = 92;        // -8% 基线，下调还会随健康度动态抬升
+static unsigned int lotserver_rtt_pressure_low = 110;
+static unsigned int lotserver_rtt_pressure_high = 170;
+static unsigned int lotserver_loss_noise_pct = 4;
+static unsigned int lotserver_noise_window_hyst = 3;
+static bool lotserver_ml_enabled = true;
+static int lotserver_ml_w_health = 2;
+static int lotserver_ml_w_rtt = 1;
+static int lotserver_ml_w_loss = 3;
+static int lotserver_ml_bias = 0;
 
 // --- 参数回调 ---
 static int param_set_rate(const char *val, const struct kernel_param *kp) { return param_set_ulong(val, kp); }
@@ -134,6 +155,33 @@ static int param_set_beta(const char *val, const struct kernel_param *kp) {
     }
     return ret;
 }
+static int param_set_percent(const char *val, const struct kernel_param *kp) {
+    int ret = param_set_uint(val, kp);
+    if (!ret) {
+        unsigned int *p = (unsigned int *)kp->arg;
+        if (*p > 300) *p = 300;
+        if (*p == 0) *p = 1;
+    }
+    return ret;
+}
+static int param_set_msec(const char *val, const struct kernel_param *kp) {
+    int ret = param_set_uint(val, kp);
+    if (!ret) {
+        unsigned int *p = (unsigned int *)kp->arg;
+        if (*p < 10) *p = 10;
+        if (*p > 600000) *p = 600000;
+    }
+    return ret;
+}
+static int param_set_weight(const char *val, const struct kernel_param *kp) {
+    int ret = param_set_int(val, kp);
+    if (!ret) {
+        int *p = (int *)kp->arg;
+        if (*p > 64) *p = 64;
+        if (*p < -64) *p = -64;
+    }
+    return ret;
+}
 
 static const struct kernel_param_ops param_ops_rate = { .set = param_set_rate, .get = param_get_ulong, };
 static const struct kernel_param_ops param_ops_gain = { .set = param_set_gain, .get = param_get_uint, };
@@ -142,6 +190,9 @@ static const struct kernel_param_ops param_ops_max_cwnd = { .set = param_set_max
 static const struct kernel_param_ops param_ops_adaptive = { .set = param_set_adaptive, .get = param_get_bool, };
 static const struct kernel_param_ops param_ops_turbo = { .set = param_set_turbo, .get = param_get_bool, };
 static const struct kernel_param_ops param_ops_beta = { .set = param_set_beta, .get = param_get_uint, };
+static const struct kernel_param_ops param_ops_percent = { .set = param_set_percent, .get = param_get_uint, };
+static const struct kernel_param_ops param_ops_msec = { .set = param_set_msec, .get = param_get_uint, };
+static const struct kernel_param_ops param_ops_weight = { .set = param_set_weight, .get = param_get_int, };
 
 module_param_cb(lotserver_rate, &param_ops_rate, &lotserver_rate, 0644);
 module_param_cb(lotserver_start_rate, &param_ops_rate, &lotserver_start_rate, 0644); // 新增
@@ -153,6 +204,22 @@ module_param_cb(lotserver_turbo, &param_ops_turbo, &lotserver_turbo, 0644);
 module_param_cb(lotserver_beta, &param_ops_beta, &lotserver_beta, 0644);
 module_param(lotserver_verbose, bool, 0644);
 module_param(lotserver_safe_mode, bool, 0644);
+module_param_cb(lotserver_high_rtt_us, &param_ops_msec, &lotserver_high_rtt_us, 0644);
+module_param_cb(lotserver_probe_boost, &param_ops_percent, &lotserver_probe_boost, 0644);
+module_param_cb(lotserver_probe_boost_highrtt, &param_ops_percent, &lotserver_probe_boost_highrtt, 0644);
+module_param_cb(lotserver_up_max, &param_ops_percent, &lotserver_up_max, 0644);
+module_param_cb(lotserver_down_min, &param_ops_percent, &lotserver_down_min, 0644);
+module_param_cb(lotserver_rtt_pressure_low, &param_ops_percent, &lotserver_rtt_pressure_low, 0644);
+module_param_cb(lotserver_rtt_pressure_high, &param_ops_percent, &lotserver_rtt_pressure_high, 0644);
+module_param_cb(lotserver_loss_noise_pct, &param_ops_percent, &lotserver_loss_noise_pct, 0644);
+module_param_cb(lotserver_noise_window_hyst, &param_ops_percent, &lotserver_noise_window_hyst, 0644);
+module_param_cb(lotserver_autotune, &param_ops_bool, &lotserver_autotune, 0644);
+module_param_cb(lotserver_tune_interval_ms, &param_ops_msec, &lotserver_tune_interval_ms, 0644);
+module_param_cb(lotserver_ml_enabled, &param_ops_bool, &lotserver_ml_enabled, 0644);
+module_param_cb(lotserver_ml_w_health, &param_ops_weight, &lotserver_ml_w_health, 0644);
+module_param_cb(lotserver_ml_w_rtt, &param_ops_weight, &lotserver_ml_w_rtt, 0644);
+module_param_cb(lotserver_ml_w_loss, &param_ops_weight, &lotserver_ml_w_loss, 0644);
+module_param_cb(lotserver_ml_bias, &param_ops_weight, &lotserver_ml_bias, 0644);
 
 // --- 全局统计 ---
 static atomic_t active_connections = ATOMIC_INIT(0);
@@ -160,6 +227,17 @@ static atomic64_t total_bytes_sent = ATOMIC64_INIT(0);
 static atomic_t total_losses = ATOMIC_INIT(0);
 static atomic_t history_entries_count = ATOMIC_INIT(0);
 static struct kmem_cache *zeta_history_cache;
+static struct dentry *lotspeed_debugfs_dir;
+
+struct lotspeed_tune_stats {
+    u32 health_ewma;
+    u32 rtt_pressure_ewma;
+    u32 loss_ewma;
+    spinlock_t lock;
+};
+
+static struct lotspeed_tune_stats ls_tune_stats;
+static struct delayed_work ls_tuner_work;
 
 // --- ZETA 学习引擎结构 ---
 struct zeta_history_entry {
@@ -346,8 +424,9 @@ static void lotspeed_init(struct sock *sk)
     ca->probe_rtt_ts = tcp_jiffies32;
 
     // --- v5.6: 软启动 (Soft Start) ---
-    // 不再直接使用 lotserver_rate (1Gbps)，而是使用 start_rate (50Mbps)
-    ca->target_rate = lotserver_start_rate;
+    // 默认更激进：初始目标速率拉高到 start_rate 的 3 倍，但不超过全局上限
+    ca->target_rate = lotserver_start_rate * 3;
+    if (ca->target_rate > lotserver_rate) ca->target_rate = lotserver_rate;
 
     ca->cwnd_gain = lotserver_gain;
     ca->ss_mode = true;
@@ -444,6 +523,48 @@ static void lotspeed_release(struct sock *sk)
     }
 }
 
+static int lotspeed_debugfs_show(struct seq_file *m, void *v)
+{
+    unsigned long flags;
+    u32 health, rtt_p, loss;
+
+    spin_lock_irqsave(&ls_tune_stats.lock, flags);
+    health = ls_tune_stats.health_ewma;
+    rtt_p = ls_tune_stats.rtt_pressure_ewma;
+    loss = ls_tune_stats.loss_ewma;
+    spin_unlock_irqrestore(&ls_tune_stats.lock, flags);
+
+    seq_printf(m, "health_ewma=%u\n", health);
+    seq_printf(m, "rtt_pressure_ewma=%u\n", rtt_p);
+    seq_printf(m, "loss_ewma=%u\n", loss);
+    seq_printf(m, "up_max=%u\n", lotserver_up_max);
+    seq_printf(m, "down_min=%u\n", lotserver_down_min);
+    seq_printf(m, "probe_boost=%u\n", lotserver_probe_boost);
+    seq_printf(m, "probe_boost_highrtt=%u\n", lotserver_probe_boost_highrtt);
+    seq_printf(m, "high_rtt_us=%u\n", lotserver_high_rtt_us);
+    seq_printf(m, "rtt_pressure_low=%u\n", lotserver_rtt_pressure_low);
+    seq_printf(m, "rtt_pressure_high=%u\n", lotserver_rtt_pressure_high);
+    seq_printf(m, "loss_noise_pct=%u\n", lotserver_loss_noise_pct);
+    seq_printf(m, "noise_window_hyst=%u\n", lotserver_noise_window_hyst);
+    seq_printf(m, "ml_enabled=%d\n", lotserver_ml_enabled);
+    seq_printf(m, "ml_w_health=%d ml_w_rtt=%d ml_w_loss=%d ml_bias=%d\n",
+               lotserver_ml_w_health, lotserver_ml_w_rtt, lotserver_ml_w_loss, lotserver_ml_bias);
+    return 0;
+}
+
+static int lotspeed_debugfs_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, lotspeed_debugfs_show, inode->i_private);
+}
+
+static const struct file_operations lotspeed_debugfs_fops = {
+    .owner = THIS_MODULE,
+    .open = lotspeed_debugfs_open,
+    .read = seq_read,
+    .llseek = seq_lseek,
+    .release = single_release,
+};
+
 static void lotspeed_update_rtt(struct sock *sk, u32 rtt_us)
 {
     struct lotspeed *ca = inet_csk_ca(sk);
@@ -485,6 +606,10 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
     u32 health_score = 100;
     u32 loss_rate_inst = 0;
     bool loss_prob_noise = false;
+    static u8 noise_streak;
+    u32 up_limit, down_floor, noise_thresh;
+    s32 ml_score = 0;
+    s32 ml_gain = 0;
 
     lotspeed_update_rtt(sk, rtt_us);
     if (!rtt_us) rtt_us = 1000;
@@ -531,8 +656,8 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
         else ca->last_bw = (ca->last_bw * LOTSPEED_SMOOTH_NUM + bw * (LOTSPEED_SMOOTH_DEN - LOTSPEED_SMOOTH_NUM)) / LOTSPEED_SMOOTH_DEN;
     }
 
-    if (ca->rtt_min && ca->rtt_min >= LOTSPEED_HIGH_RTT_US) high_rtt_path = true;
-    else if (hist_recent && hist_rtt && hist_rtt >= LOTSPEED_HIGH_RTT_US) high_rtt_path = true;
+    if (ca->rtt_min && ca->rtt_min >= lotserver_high_rtt_us) high_rtt_path = true;
+    else if (hist_recent && hist_rtt && hist_rtt >= lotserver_high_rtt_us) high_rtt_path = true;
 
     if (ca->rtt_min > 0) rtt_pressure = max_t(u32, 100, SAFE_DIV(rtt_us * 100, ca->rtt_min));
     if (rtt_pressure < 100) rtt_pressure = 100;
@@ -550,6 +675,49 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
     }
     health_score = clamp_t(u32, health_score, 40, 140);
 
+    // 更新全局调参统计（抽样，降低锁竞争）
+    if ((ca->sample_count & 0x3F) == 0) {
+        unsigned long flags;
+        spin_lock_irqsave(&ls_tune_stats.lock, flags);
+        ls_tune_stats.health_ewma = (ls_tune_stats.health_ewma * LOTSPEED_SMOOTH_NUM + health_score * (LOTSPEED_SMOOTH_DEN - LOTSPEED_SMOOTH_NUM)) / LOTSPEED_SMOOTH_DEN;
+        ls_tune_stats.rtt_pressure_ewma = (ls_tune_stats.rtt_pressure_ewma * LOTSPEED_SMOOTH_NUM + rtt_pressure * (LOTSPEED_SMOOTH_DEN - LOTSPEED_SMOOTH_NUM)) / LOTSPEED_SMOOTH_DEN;
+        if (loss_rate_inst > 0 || ls_tune_stats.loss_ewma > 0)
+            ls_tune_stats.loss_ewma = (ls_tune_stats.loss_ewma * LOTSPEED_SMOOTH_NUM + loss_rate_inst * (LOTSPEED_SMOOTH_DEN - LOTSPEED_SMOOTH_NUM)) / LOTSPEED_SMOOTH_DEN;
+        spin_unlock_irqrestore(&ls_tune_stats.lock, flags);
+    }
+
+    // 动态调参：根据健康度/RTT压力调节上/下调界限与噪声阈值
+    up_limit = lotserver_up_max;
+    if (health_score > 110 && rtt_pressure <= lotserver_rtt_pressure_low)
+        up_limit = min_t(u32, lotserver_up_max + 6, 130);
+    else if (health_score < 90)
+        up_limit = max_t(u32, lotserver_up_max - 5, 105);
+
+    down_floor = lotserver_down_min;
+    if (health_score > 110) down_floor = min_t(u32, 98, down_floor + 6);
+    if (health_score < 90) down_floor = max_t(u32, down_floor - 4, 80);
+
+    noise_thresh = lotserver_loss_noise_pct;
+    if (health_score > 115) noise_thresh = max_t(u32, 1, lotserver_loss_noise_pct - 1);
+    if (health_score < 90) noise_thresh = min_t(u32, lotserver_loss_noise_pct + 2, 10);
+
+    if (lotserver_ml_enabled) {
+        u32 loss_feature = ca->loss_ewma ? ca->loss_ewma : loss_rate_inst;
+        ml_score = lotserver_ml_bias;
+        ml_score += lotserver_ml_w_health * (s32)health_score;
+        ml_score -= lotserver_ml_w_rtt * (s32)rtt_pressure;
+        ml_score -= lotserver_ml_w_loss * (s32)loss_feature;
+        ml_gain = clamp_t(s32, ml_score / 200, -20, 20);
+        if (ml_gain > 0) {
+            up_limit = min_t(u32, up_limit + ml_gain, 150);
+            if (down_floor > 70) down_floor = max_t(u32, 70, down_floor - min(5, ml_gain));
+        } else if (ml_gain < 0) {
+            u32 mg = (u32)(-ml_gain);
+            if (up_limit > 80) up_limit = max_t(u32, 80, up_limit > mg ? up_limit - mg : 80);
+            down_floor = min_t(u32, 98, down_floor + min(5, mg));
+        }
+    }
+
     if (!lotserver_turbo || lotserver_safe_mode) {
         if (flag & CA_ACK_ECE) congestion_detected = true;
         if (ca->rtt_min > 0) {
@@ -558,10 +726,14 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
         }
     }
 
-    // 概率性噪声丢包识别：低损+低RTT压力视为随机噪声
-    if (loss_rate_inst > 0 && loss_rate_inst <= 2 && rtt_pressure <= LOTSPEED_RTT_PRESSURE_LOW && !(flag & CA_ACK_ECE)) {
-        loss_prob_noise = true;
+    // 概率性噪声丢包识别：低损+低RTT压力视为随机噪声，加入滞后计数
+    if (loss_rate_inst > 0 && loss_rate_inst <= noise_thresh &&
+        rtt_pressure <= lotserver_rtt_pressure_low && !(flag & CA_ACK_ECE)) {
+        if (noise_streak < 250) noise_streak++;
+    } else if (noise_streak > 0) {
+        noise_streak--;
     }
+    if (noise_streak >= lotserver_noise_window_hyst) loss_prob_noise = true;
     if (congestion_detected && loss_prob_noise) congestion_detected = false;
 
     if (congestion_detected && !(flag & CA_ACK_ECE) && hist_recent && hist_loss <= HIST_LOW_LOSS_PERCENT && bw > 0) {
@@ -588,8 +760,8 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
                 u64 up_factor = very_healthy ? LOTSPEED_RATE_UP_FAST : LOTSPEED_RATE_UP;
                 if (high_rtt_path) up_factor += 3;
                 if (health_score > 100) up_factor += min_t(u64, 10, (health_score - 100) / 5);
-                if (rtt_pressure <= LOTSPEED_RTT_PRESSURE_LOW) up_factor += 2;
-                if (up_factor > LOTSPEED_UP_MAX) up_factor = LOTSPEED_UP_MAX;
+                if (rtt_pressure <= lotserver_rtt_pressure_low) up_factor += 2;
+                if (up_factor > up_limit) up_factor = up_limit;
                 u64 next_rate = ca->target_rate * up_factor / 100;
                 if (bw_ref > ca->target_rate) {
                     u64 bias = (bw_ref - ca->target_rate) / 3;
@@ -601,7 +773,7 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
             }
             // 额外探测：健康且距离峰值还有空间时做一次冲高
             if (bandwidth_gap && bw_ref >= ca->target_rate * 70 / 100) {
-                u64 burst = ca->target_rate * (high_rtt_path ? LOTSPEED_PROBE_BOOST_HIGHRTT : LOTSPEED_PROBE_BOOST) / 100;
+                u64 burst = ca->target_rate * (high_rtt_path ? lotserver_probe_boost_highrtt : lotserver_probe_boost) / 100;
                 u64 bw_bias = bw_ref * (high_rtt_path ? 110 : 105) / 100;
                 if (bw_bias > burst) burst = bw_bias;
                 if (burst > lotserver_rate) burst = lotserver_rate;
@@ -613,11 +785,13 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
                 ca->loss_ewma >= HIST_HIGH_LOSS_PERCENT || congestion_detected) {
                 u64 down_factor = (ca->loss_ewma > LOSS_RATE_CAP_PERCENT) ? LOTSPEED_RATE_DOWN_HARD : LOTSPEED_RATE_DOWN;
                 if (high_rtt_path && health_score >= 100 && down_factor < 98) down_factor += 3;
-                if (rtt_pressure > LOTSPEED_RTT_PRESSURE_HIGH && ca->loss_ewma > HIST_HIGH_LOSS_PERCENT) {
-                    if (down_factor > LOTSPEED_DOWN_MIN) down_factor -= 2;
+                if (rtt_pressure > lotserver_rtt_pressure_high && ca->loss_ewma > HIST_HIGH_LOSS_PERCENT) {
+                    if (down_factor > lotserver_down_min) down_factor -= 2;
                 }
                 if (loss_prob_noise && down_factor < 100) down_factor = min_t(u64, 100, down_factor + 6);
-                if (down_factor < LOTSPEED_DOWN_MIN) down_factor = LOTSPEED_DOWN_MIN;
+                if (health_score > 110 && loss_rate_inst <= lotserver_loss_noise_pct + 1 && down_factor < 97)
+                    down_factor = 97;
+                if (down_factor < down_floor) down_factor = down_floor;
                 u64 next_rate = ca->target_rate * down_factor / 100;
                 // 倾向实测带宽，避免过度收缩
                 next_rate = (next_rate * 3 + bw_ref * 2) / 5;
@@ -632,7 +806,7 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
         u64 hist_rate = hist_bw;
         if (hist_loss > HIST_HIGH_LOSS_PERCENT) hist_rate = (hist_rate * 9) / 10;
         if (hist_rate > ca->target_rate) {
-            u64 boosted = hist_rate * (high_rtt_path ? LOTSPEED_PROBE_BOOST_HIGHRTT : LOTSPEED_RATE_UP_FAST) / 100;
+            u64 boosted = hist_rate * (high_rtt_path ? lotserver_probe_boost_highrtt : LOTSPEED_RATE_UP_FAST) / 100;
             if (boosted < hist_rate) boosted = hist_rate;
             ca->target_rate = max_t(u64, ca->target_rate, boosted);
         }
@@ -821,8 +995,8 @@ static u32 lotspeed_ssthresh(struct sock *sk)
     if (!rtt_us) rtt_us = ca->rtt_median ? ca->rtt_median : 20000;
     u32 base_rtt = ca->rtt_min ? ca->rtt_min : rtt_us;
 
-    if ((ca->rtt_min && ca->rtt_min >= LOTSPEED_HIGH_RTT_US) ||
-        (ca->rtt_median && ca->rtt_median >= LOTSPEED_HIGH_RTT_US)) {
+    if ((ca->rtt_min && ca->rtt_min >= lotserver_high_rtt_us) ||
+        (ca->rtt_median && ca->rtt_median >= lotserver_high_rtt_us)) {
         high_rtt = true;
     }
 
@@ -874,8 +1048,8 @@ static u32 lotspeed_ssthresh(struct sock *sk)
 static void lotspeed_set_state_hook(struct sock *sk, u8 new_state)
 {
     struct lotspeed *ca = inet_csk_ca(sk);
-    bool high_rtt = (ca && ((ca->rtt_min && ca->rtt_min >= LOTSPEED_HIGH_RTT_US) ||
-                    (ca->rtt_median && ca->rtt_median >= LOTSPEED_HIGH_RTT_US)));
+    bool high_rtt = (ca && ((ca->rtt_min && ca->rtt_min >= lotserver_high_rtt_us) ||
+                    (ca->rtt_median && ca->rtt_median >= lotserver_high_rtt_us)));
     bool clean_path = (ca && ca->loss_ewma && ca->loss_ewma <= HIST_LOW_LOSS_PERCENT);
     switch (new_state) {
         case TCP_CA_Loss:
@@ -905,8 +1079,8 @@ static u32 lotspeed_undo_cwnd(struct sock *sk)
 {
     struct tcp_sock *tp = tcp_sk(sk);
     struct lotspeed *ca = inet_csk_ca(sk);
-    bool high_rtt = (ca && ((ca->rtt_min && ca->rtt_min >= LOTSPEED_HIGH_RTT_US) ||
-                    (ca->rtt_median && ca->rtt_median >= LOTSPEED_HIGH_RTT_US)));
+    bool high_rtt = (ca && ((ca->rtt_min && ca->rtt_min >= lotserver_high_rtt_us) ||
+                    (ca->rtt_median && ca->rtt_median >= lotserver_high_rtt_us)));
     bool clean_path = (ca && ca->loss_ewma && ca->loss_ewma <= HIST_LOW_LOSS_PERCENT);
     u32 restored;
 
@@ -943,6 +1117,51 @@ static void lotspeed_cwnd_event(struct sock *sk, enum tcp_ca_event event)
     }
 }
 
+// --- 轻量自调节（基于全局健康度） ---
+static void lotspeed_tuner_fn(struct work_struct *work)
+{
+    u32 health, rtt_p, loss;
+    unsigned long flags;
+
+    spin_lock_irqsave(&ls_tune_stats.lock, flags);
+    health = ls_tune_stats.health_ewma ? ls_tune_stats.health_ewma : 100;
+    rtt_p = ls_tune_stats.rtt_pressure_ewma ? ls_tune_stats.rtt_pressure_ewma : 100;
+    loss = ls_tune_stats.loss_ewma;
+    spin_unlock_irqrestore(&ls_tune_stats.lock, flags);
+
+    if (lotserver_autotune) {
+        // 激进路径：健康高且 RTT 压力低
+        if (health > 115 && rtt_p <= lotserver_rtt_pressure_low && loss <= 5) {
+            if (lotserver_up_max < 140) lotserver_up_max++;
+            if (lotserver_probe_boost < 150) lotserver_probe_boost += 2;
+            if (lotserver_probe_boost_highrtt < 180) lotserver_probe_boost_highrtt += 2;
+            if (lotserver_down_min > 70) lotserver_down_min--;
+        }
+
+        // 退让路径：健康低或 RTT 压力高或丢包高
+        if (health < 90 || rtt_p > lotserver_rtt_pressure_high || loss > 10) {
+            if (lotserver_up_max > 100) lotserver_up_max--;
+            if (lotserver_probe_boost > 80) lotserver_probe_boost = max_t(u32, 80, lotserver_probe_boost - 2);
+            if (lotserver_probe_boost_highrtt > 100) lotserver_probe_boost_highrtt = max_t(u32, 100, lotserver_probe_boost_highrtt - 2);
+            if (lotserver_down_min < 95) lotserver_down_min++;
+            if (lotserver_loss_noise_pct > 1) lotserver_loss_noise_pct = max_t(u32, 1, lotserver_loss_noise_pct - 1);
+        }
+
+        // 轻量“ML”偏置：根据全局健康趋势微调 bias/权重
+        if (lotserver_ml_enabled) {
+            if (health > 120 && rtt_p < lotserver_rtt_pressure_low) {
+                if (lotserver_ml_bias < 32) lotserver_ml_bias++;
+            } else if (health < 85 || rtt_p > lotserver_rtt_pressure_high) {
+                if (lotserver_ml_bias > -32) lotserver_ml_bias--;
+            }
+        }
+    }
+
+    if (lotserver_autotune && lotserver_tune_interval_ms > 0) {
+        schedule_delayed_work(&ls_tuner_work, msecs_to_jiffies(lotserver_tune_interval_ms));
+    }
+}
+
 static struct tcp_congestion_ops lotspeed_ops __read_mostly = {
         .name           = "lotspeed",
         .owner          = THIS_MODULE,
@@ -965,6 +1184,7 @@ static int __init lotspeed_module_init(void)
                                            0, SLAB_HWCACHE_ALIGN, NULL);
     if (!zeta_history_cache)
         return -ENOMEM;
+    spin_lock_init(&ls_tune_stats.lock);
 
     pr_info("lotspeed v5.6 (Auto-Scaling) loaded.\n");
     pr_info("Struct size: %u bytes (limit: %u)\n",
@@ -976,6 +1196,13 @@ static int __init lotspeed_module_init(void)
         kmem_cache_destroy(zeta_history_cache);
         return -EINVAL;
     }
+    lotspeed_debugfs_dir = debugfs_create_dir("lotspeed", NULL);
+    if (!IS_ERR_OR_NULL(lotspeed_debugfs_dir)) {
+        debugfs_create_file("stats", 0444, lotspeed_debugfs_dir, NULL, &lotspeed_debugfs_fops);
+    }
+    INIT_DELAYED_WORK(&ls_tuner_work, lotspeed_tuner_fn);
+    if (lotserver_autotune && lotserver_tune_interval_ms > 0)
+        schedule_delayed_work(&ls_tuner_work, msecs_to_jiffies(lotserver_tune_interval_ms));
     return 0;
 }
 
@@ -986,6 +1213,7 @@ static void __exit lotspeed_module_exit(void)
     int bkt, retry=0;
 
     tcp_unregister_congestion_control(&lotspeed_ops);
+    cancel_delayed_work_sync(&ls_tuner_work);
     while (atomic_read(&active_connections) > 0 && retry < 50) { msleep(100); retry++; }
     synchronize_rcu();
 
@@ -996,6 +1224,7 @@ static void __exit lotspeed_module_exit(void)
             kmem_cache_free(zeta_history_cache, entry);
     }
     spin_unlock_bh(&zeta_history_lock);
+    debugfs_remove_recursive(lotspeed_debugfs_dir);
     if (zeta_history_cache) kmem_cache_destroy(zeta_history_cache);
     pr_info("lotspeed v5.6 unloaded.\n");
 }
