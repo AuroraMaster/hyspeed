@@ -55,6 +55,12 @@ static bool lotserver_hist_enable = true;
 static unsigned int lotserver_hist_ttl_sec = 1200;    // TTL: 20 分钟
 static unsigned int lotserver_hist_min_samples = 6;   // 需要至少 6 个样本
 static unsigned int lotserver_hist_max_entries = 8192;// 最大条目数
+// 勇敢模型：抗抖动、维持高发包
+static bool lotserver_brave_enable = true;
+static unsigned int lotserver_brave_rtt_pct = 25;     // RTT 突增容忍度（百分比）
+static unsigned int lotserver_brave_hold_ms = 400;    // 突增后冻结窗口/速率时间
+static unsigned int lotserver_brave_floor_pct = 85;   // 冻结时窗口不低于此比例
+static unsigned int lotserver_brave_push_pct = 8;     // 正常时目标窗口额外提升
 
 // 参数校验
 static int param_set_min_cwnd(const char *val, const struct kernel_param *kp)
@@ -118,6 +124,17 @@ static int param_set_usec(const char *val, const struct kernel_param *kp)
     return ret;
 }
 
+static int param_set_msec(const char *val, const struct kernel_param *kp)
+{
+    int ret = param_set_uint(val, kp);
+    if (!ret) {
+        unsigned int *p = (unsigned int *)kp->arg;
+        if (*p < 1) *p = 1;
+        if (*p > 600000) *p = 600000; // 10 分钟上限
+    }
+    return ret;
+}
+
 static const struct kernel_param_ops param_ops_rate = { .set = param_set_ulong, .get = param_get_ulong, };
 static const struct kernel_param_ops param_ops_min_cwnd = { .set = param_set_min_cwnd, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_max_cwnd = { .set = param_set_max_cwnd, .get = param_get_uint, };
@@ -125,6 +142,7 @@ static const struct kernel_param_ops param_ops_beta = { .set = param_set_beta, .
 static const struct kernel_param_ops param_ops_alpha = { .set = param_set_alpha, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_percent_100 = { .set = param_set_percent_100, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_usec = { .set = param_set_usec, .get = param_get_uint, };
+static const struct kernel_param_ops param_ops_msec = { .set = param_set_msec, .get = param_get_uint, };
 
 module_param_cb(lotserver_rate, &param_ops_rate, &lotserver_rate, 0644);
 module_param_cb(lotserver_min_cwnd, &param_ops_min_cwnd, &lotserver_min_cwnd, 0644);
@@ -144,6 +162,11 @@ module_param(lotserver_hist_enable, bool, 0644);
 module_param_cb(lotserver_hist_ttl_sec, &param_ops_rate, &lotserver_hist_ttl_sec, 0644);
 module_param_cb(lotserver_hist_min_samples, &param_ops_min_cwnd, &lotserver_hist_min_samples, 0644);
 module_param_cb(lotserver_hist_max_entries, &param_ops_max_cwnd, &lotserver_hist_max_entries, 0644);
+module_param(lotserver_brave_enable, bool, 0644);
+module_param_cb(lotserver_brave_rtt_pct, &param_ops_percent_100, &lotserver_brave_rtt_pct, 0644);
+module_param_cb(lotserver_brave_hold_ms, &param_ops_msec, &lotserver_brave_hold_ms, 0644);
+module_param_cb(lotserver_brave_floor_pct, &param_ops_percent_100, &lotserver_brave_floor_pct, 0644);
+module_param_cb(lotserver_brave_push_pct, &param_ops_percent_100, &lotserver_brave_push_pct, 0644);
 
 // --- 状态机 ---
 enum lotspeed_state {
@@ -157,6 +180,8 @@ struct lotspeed {
     u32 rtt_min;          // 基准 RTT（usec）
     u32 last_state_ts;    // 状态切换时间戳（jiffies32）
     u32 probe_rtt_ts;     // 上次探测 RTT（jiffies32）
+    u32 brave_hold_cwnd;  // 勇敢模式冻结时的窗口基线
+    u32 brave_freeze_until; // 勇敢模式冻结截至时间（jiffies32）
     enum lotspeed_state state;
     bool ss_mode;
 };
@@ -330,6 +355,8 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
     bool high_delay_path;
     bool hist_hint = false;
     u32 hist_alpha = 0;
+    bool brave_active = false;
+    u32 now_jif = tcp_jiffies32;
 
     SAFETY_CHECK(tp && ca, );
     (void)flag;
@@ -359,6 +386,7 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
         rtt_us = ca->rtt_min ? ca->rtt_min : 1000;
     base_rtt = ca->rtt_min ? ca->rtt_min : rtt_us;
     high_delay_path = lotserver_hd_enable && base_rtt >= lotserver_hd_thresh_us;
+    brave_active = lotserver_brave_enable && time_before(now_jif, ca->brave_freeze_until);
 
     // 定期进入 PROBE_RTT 刷新基准 RTT
     if (ca->state != PROBE_RTT &&
@@ -373,6 +401,16 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
             enter_state(sk, ca->ss_mode ? FAST_STARTUP : FAST_CA);
         }
         goto out_pacing;
+    }
+
+    // 勇敢模式：检测突发 RTT 抖动，冻结窗口/速率，防止瞬时下滑
+    if (lotserver_brave_enable && base_rtt > 0) {
+        u32 rtt_thresh = base_rtt + (base_rtt * lotserver_brave_rtt_pct) / 100;
+        if (rtt_us > rtt_thresh && tp->snd_cwnd > lotserver_min_cwnd) {
+            ca->brave_hold_cwnd = tp->snd_cwnd;
+            ca->brave_freeze_until = now_jif + msecs_to_jiffies(lotserver_brave_hold_ms);
+            brave_active = true;
+        }
     }
 
     if (ca->ss_mode) {
@@ -411,12 +449,27 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
 
         cwnd = (u32)SAFE_DIV64((u64)tp->snd_cwnd * (FAST_GAMMA_SCALE - gamma) +
                                cwnd_target * gamma, FAST_GAMMA_SCALE);
+
+        // 正常路径额外 push（勇敢模型），仅在非抖动时
+        if (lotserver_brave_enable && !brave_active &&
+            rtt_us <= base_rtt + (base_rtt * lotserver_fast_ss_exit) / 100) {
+            u64 pushed = (u64)cwnd * (100 + lotserver_brave_push_pct) / 100;
+            if (pushed > LOTSPEED_MAX_U32) pushed = LOTSPEED_MAX_U32;
+            cwnd = (u32)pushed;
+        }
     }
 
     cwnd = clamp_t(u32, cwnd, lotserver_min_cwnd, lotserver_max_cwnd);
     pipe = tcp_packets_in_flight(tp);
     if (pipe > 0 && cwnd < pipe + 1)
         cwnd = pipe + 1; // RFC3517 风格：确保cwnd不小于在途数据量，避免停顿
+
+    if (brave_active && ca->brave_hold_cwnd) {
+        u32 floor = (ca->brave_hold_cwnd * lotserver_brave_floor_pct) / 100;
+        if (floor < lotserver_min_cwnd) floor = lotserver_min_cwnd;
+        if (cwnd < floor) cwnd = floor;
+    }
+
     tp->snd_cwnd = cwnd;
 
 out_pacing:
@@ -428,6 +481,8 @@ out_pacing:
             // 高延迟路径给予轻微 pacing 提升，改善管道填充速度
             rate = rate * (100 + lotserver_hd_gamma_boost / 2) / 100;
         }
+        if (brave_active && ca->pacing_rate > 0 && rate < ca->pacing_rate)
+            rate = ca->pacing_rate; // 冻结期间保持原速
         if (rate > lotserver_rate)
             rate = lotserver_rate;
         ca->pacing_rate = rate;
