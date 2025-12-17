@@ -51,23 +51,52 @@ dmesg -w
 
 ```bash
 
-#推荐参数值
-默认参数调整为更适合 130–200ms 洲际链路的激进配置（文件：lotspeed.c）：
-
-  - 高 RTT 判定 130ms (lotserver_high_rtt_us=130000)。
-  - 突刺/上调：probe_boost=130、probe_boost_highrtt=150、up_max=130。
-  - 下调底线更稳：down_min=92（健康高时仍会动态抬升）。
-  - RTT 压力阈值：rtt_pressure_low=110、rtt_pressure_high=170。
-  - 噪声丢包识别：loss_noise_pct=4、noise_window_hyst=3。
-  - 自调开启，周期 1500ms：lotserver_autotune=1、lotserver_tune_interval_ms=1500。
-  - 轻量 ML 默认开启，权重 health=2、rtt=1、loss=3、bias=0。
-
-  当前默认加载即使用上述值；仍可在运行时调整：
-
-  p=/sys/module/lotspeed/parameters
-  # 可按需覆盖
-  echo 120000 > $p/lotserver_high_rtt_us        # 如需更保守
-  echo 140     > $p/lotserver_up_max             # 如需更激进上调
+[cce ~]$ lotspeed status
+╔════════════════════════════════════════════════════════════════════╗
+║                   LotSpeed v5.6 Status (ML-TCP)                    ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Module Status                                               Loaded ║
+║ Reference Count                                                  1 ║
+║ Active Connections                                              00 ║
+║ Active Algorithm                                          lotspeed ║
+╟────────────────────────────────────────────────────────────────────╢
+║                         Current Parameters                         ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Global Rate Limit                          125.00 MB/s (1.00 Gbps) ║
+║ Min CWND                                                16 packets ║
+║ Max CWND                                             15000 packets ║
+║ Fairness (Beta)                                                60% ║
+║ Turbo Mode                                                Disabled ║
+║ Safe Mode                                                  Enabled ║
+║ FAST Alpha                                              20 packets ║
+║ FAST Gamma                                                     50% ║
+║ SS Exit Threshold                                              25% ║
+║ High-Delay Mode                                            Enabled ║
+║ HD Threshold                                              180000us ║
+║ HD Reference RTT                                           80000us ║
+║ HD Gamma Boost                                                 20% ║
+║ HD Alpha Boost                                          10 packets ║
+║ Brave Mode                                                 Enabled ║
+║ Brave RTT Tolerance                                            25% ║
+║ Brave Hold Time                                              400ms ║
+║ Brave Floor                                                    85% ║
+║ Brave Push                                                      8% ║
+╚════════════════════════════════════════════════════════════════════╝
+[cce ~]$ lotspeed help
+╔════════════════════════════════════════════════════════════════════╗
+║                      LotSpeed v5.6 Management                      ║
+╟────────────────────────────────────────────────────────────────────╢
+║ start                                               Start LotSpeed ║
+║ stop                                                 Stop LotSpeed ║
+║ restart                                           Restart LotSpeed ║
+║ status                                                Check Status ║
+║ preset [name]                                         Apply Preset ║
+║ set [k] [v]                                          Set Parameter ║
+║ monitor                                                  Live Logs ║
+║ uninstall                                        Remove Completely ║
+╟────────────────────────────────────────────────────────────────────╢
+║ Presets: conservative, balanced, aggressive                        ║
+╚════════════════════════════════════════════════════════════════════╝
 
 ```
 
