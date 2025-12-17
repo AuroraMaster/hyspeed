@@ -106,6 +106,18 @@ iperf3 -c green1 -p 35201 -R -t 30
 ✅ 洲际场景适配
 
 
+
+### speedtest 测试结果
+
+* 用之前
+
+![b058ec2ebdb2a095d396cea05dccf499.png](img/b058ec2ebdb2a095d396cea05dccf499.png)
+
+* 用之后
+
+![f7525becdae16659ddfd54d99efe0f66.png](img/f7525becdae16659ddfd54d99efe0f66.png)
+
+
 PAC (Proactive ACK Control) for TCP Incast Congestion
 ==========================================
 
