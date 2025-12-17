@@ -478,9 +478,12 @@ show_status() {
     print_box_div
 
     if [[ -d /sys/module/lotspeed/parameters ]]; then
-        for param in lotserver_rate lotserver_start_rate lotserver_gain lotserver_min_cwnd \
-                     lotserver_max_cwnd lotserver_beta lotserver_adaptive lotserver_turbo \
-                     lotserver_verbose lotserver_safe_mode; do
+        for param in lotserver_rate lotserver_min_cwnd lotserver_max_cwnd lotserver_beta \
+                     lotserver_turbo lotserver_safe_mode lotserver_fast_alpha lotserver_fast_gamma \
+                     lotserver_fast_ss_exit lotserver_hd_enable lotserver_hd_thresh_us \
+                     lotserver_hd_ref_us lotserver_hd_gamma_boost lotserver_hd_alpha_boost \
+                     lotserver_brave_enable lotserver_brave_rtt_pct lotserver_brave_hold_ms \
+                     lotserver_brave_floor_pct lotserver_brave_push_pct; do
 
             param_file="/sys/module/lotspeed/parameters/$param"
             if [[ -f "$param_file" ]]; then
@@ -490,16 +493,6 @@ show_status() {
                         formatted=$(format_bytes $value)
                         bps=$(format_bps $value)
                         print_kv_row "Global Rate Limit" "$formatted ($bps)"
-                        ;;
-                    lotserver_start_rate)
-                        formatted=$(format_bytes $value)
-                        bps=$(format_bps $value)
-                        print_kv_row "Soft Start Rate" "$formatted ($bps)"
-                        ;;
-                    lotserver_gain)
-                        gain_x=$((value / 10))
-                        gain_frac=$((value % 10))
-                        print_kv_row "Gain Factor" "${gain_x}.${gain_frac}x"
                         ;;
                     lotserver_beta)
                         beta_val=$((value * 100 / 1024))
@@ -511,25 +504,11 @@ show_status() {
                     lotserver_max_cwnd)
                         print_kv_row "Max CWND" "$value packets"
                         ;;
-                    lotserver_adaptive)
-                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
-                            print_kv_row "Adaptive Mode" "${GREEN}Enabled${NC}"
-                        else
-                            print_kv_row "Adaptive Mode" "${YELLOW}Disabled${NC}"
-                        fi
-                        ;;
                     lotserver_turbo)
                         if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
                             print_kv_row "Turbo Mode" "${YELLOW}Enabled ⚡${NC}"
                         else
                             print_kv_row "Turbo Mode" "Disabled"
-                        fi
-                        ;;
-                    lotserver_verbose)
-                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
-                            print_kv_row "Verbose Logging" "${CYAN}Enabled${NC}"
-                        else
-                            print_kv_row "Verbose Logging" "Disabled"
                         fi
                         ;;
                     lotserver_safe_mode)
@@ -538,6 +517,53 @@ show_status() {
                         else
                             print_kv_row "Safe Mode" "Disabled"
                         fi
+                        ;;
+                    lotserver_fast_alpha)
+                        print_kv_row "FAST Alpha" "$value packets"
+                        ;;
+                    lotserver_fast_gamma)
+                        print_kv_row "FAST Gamma" "${value}%"
+                        ;;
+                    lotserver_fast_ss_exit)
+                        print_kv_row "SS Exit Threshold" "${value}%"
+                        ;;
+                    lotserver_hd_enable)
+                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
+                            print_kv_row "High-Delay Mode" "${GREEN}Enabled${NC}"
+                        else
+                            print_kv_row "High-Delay Mode" "Disabled"
+                        fi
+                        ;;
+                    lotserver_hd_thresh_us)
+                        print_kv_row "HD Threshold" "${value}us"
+                        ;;
+                    lotserver_hd_ref_us)
+                        print_kv_row "HD Reference RTT" "${value}us"
+                        ;;
+                    lotserver_hd_gamma_boost)
+                        print_kv_row "HD Gamma Boost" "${value}%"
+                        ;;
+                    lotserver_hd_alpha_boost)
+                        print_kv_row "HD Alpha Boost" "$value packets"
+                        ;;
+                    lotserver_brave_enable)
+                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
+                            print_kv_row "Brave Mode" "${GREEN}Enabled${NC}"
+                        else
+                            print_kv_row "Brave Mode" "Disabled"
+                        fi
+                        ;;
+                    lotserver_brave_rtt_pct)
+                        print_kv_row "Brave RTT Tolerance" "${value}%"
+                        ;;
+                    lotserver_brave_hold_ms)
+                        print_kv_row "Brave Hold Time" "${value}ms"
+                        ;;
+                    lotserver_brave_floor_pct)
+                        print_kv_row "Brave Floor" "${value}%"
+                        ;;
+                    lotserver_brave_push_pct)
+                        print_kv_row "Brave Push" "${value}%"
                         ;;
                 esac
             fi
@@ -561,32 +587,54 @@ apply_preset() {
     case $PRESET in
         conservative)
             set_val lotserver_rate 125000000
-            set_val lotserver_start_rate 12500000
-            set_val lotserver_gain 15
             set_val lotserver_min_cwnd 16
             set_val lotserver_max_cwnd 15000
             set_val lotserver_beta 717
-            set_val lotserver_adaptive 1
             set_val lotserver_turbo 0
             set_val lotserver_safe_mode 1
-            print_box_row "Applied: Conservative (1Gbps, 1.5x, Safe)" "left"
+            set_val lotserver_fast_alpha 15
+            set_val lotserver_fast_gamma 40
+            set_val lotserver_fast_ss_exit 20
+            set_val lotserver_hd_enable 1
+            set_val lotserver_brave_enable 1
+            set_val lotserver_brave_rtt_pct 20
+            print_box_row "Applied: Conservative (1Gbps, Safe)" "left"
             ;;
         balanced)
             set_val lotserver_rate 256000000
-            set_val lotserver_start_rate 25000000
-            set_val lotserver_gain 20
             set_val lotserver_min_cwnd 16
             set_val lotserver_max_cwnd 15000
-            set_val lotserver_beta 717
-            set_val lotserver_adaptive 1
+            set_val lotserver_beta 616
             set_val lotserver_turbo 0
             set_val lotserver_safe_mode 1
-            print_box_row "Applied: Balanced (2.5Gbps, 2.0x, Adaptive)" "left"
+            set_val lotserver_fast_alpha 20
+            set_val lotserver_fast_gamma 50
+            set_val lotserver_fast_ss_exit 25
+            set_val lotserver_hd_enable 1
+            set_val lotserver_brave_enable 1
+            set_val lotserver_brave_rtt_pct 25
+            print_box_row "Applied: Balanced (2.5Gbps, FAST)" "left"
+            ;;
+        aggressive)
+            set_val lotserver_rate 500000000
+            set_val lotserver_min_cwnd 16
+            set_val lotserver_max_cwnd 20000
+            set_val lotserver_beta 512
+            set_val lotserver_turbo 0
+            set_val lotserver_safe_mode 1
+            set_val lotserver_fast_alpha 30
+            set_val lotserver_fast_gamma 60
+            set_val lotserver_fast_ss_exit 30
+            set_val lotserver_hd_enable 1
+            set_val lotserver_hd_gamma_boost 30
+            set_val lotserver_brave_enable 1
+            set_val lotserver_brave_push_pct 12
+            print_box_row "Applied: Aggressive (4Gbps, High Push)" "left"
             ;;
         *)
             print_box_row "Unknown preset: $PRESET" "left" "${RED}"
             print_box_div
-            print_box_row "Available: conservative, balanced," "left"
+            print_box_row "Available: conservative, balanced, aggressive" "left"
             print_box_bottom
             exit 1
             ;;
@@ -602,14 +650,15 @@ set_param() {
         print_box_row "Parameter Set Error" "center" "${RED}"
         print_box_div
         print_box_row "Usage: lotspeed set <parameter> <value>" "left"
-        print_box_row "Example: lotspeed set lotserver_gain 20" "left"
-        print_box_row "Example: lotspeed set lotserver_start_rate 10000000" "left"
         print_box_row "Example: lotspeed set lotserver_rate 125000000" "left"
         print_box_row "Example: lotspeed set lotserver_min_cwnd 16" "left"
         print_box_row "Example: lotspeed set lotserver_max_cwnd 15000" "left"
-        print_box_row "Example: lotspeed set lotserver_beta 717" "left"
-        print_box_row "Example: lotspeed set lotserver_verbose 1/0" "left"
+        print_box_row "Example: lotspeed set lotserver_beta 616" "left"
+        print_box_row "Example: lotspeed set lotserver_fast_alpha 20" "left"
+        print_box_row "Example: lotspeed set lotserver_fast_gamma 50" "left"
+        print_box_row "Example: lotspeed set lotserver_turbo 1/0" "left"
         print_box_row "Example: lotspeed set lotserver_safe_mode 1/0" "left"
+        print_box_row "Example: lotspeed set lotserver_brave_enable 1/0" "left"
         print_box_bottom
         exit 1
     fi
@@ -729,12 +778,12 @@ case "$ACTION" in
         print_kv_row "stop" "Stop LotSpeed"
         print_kv_row "restart" "Restart LotSpeed"
         print_kv_row "status" "Check Status"
-        print_kv_row "preset [name]" "Apply Config"
+        print_kv_row "preset [name]" "Apply Preset"
         print_kv_row "set [k] [v]" "Set Parameter"
         print_kv_row "monitor" "Live Logs"
         print_kv_row "uninstall" "Remove Completely"
         print_box_div
-        print_box_row "Presets: conservative, balanced" "left"
+        print_box_row "Presets: conservative, balanced, aggressive" "left"
         print_box_bottom
         exit 1
         ;;
