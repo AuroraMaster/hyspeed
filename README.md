@@ -157,5 +157,6 @@ PAC (Proactive ACK Control) for TCP Incast Congestion
 -----------------------------------
 
 
-[![Star History Chart](https://api.star-history.com/svg?repos=uk0/lotspeed&type=Date)](https://star-history.com/#uk0/lotspeed&Date)
+## Star History
 
+[![Star History Chart](https://api.star-history.com/svg?repos=uk0/lotspeed&type=timeline&logscale&legend=top-left)](https://www.star-history.com/#uk0/lotspeed&type=timeline&logscale&legend=top-left)
