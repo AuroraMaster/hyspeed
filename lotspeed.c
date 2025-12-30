@@ -28,6 +28,11 @@
 
 #define SAFE_DIV64(n, d) ((d) ? div64_u64((n), (d)) : 0)
 
+// 检测 cong_control API 版本：4.13+ 使用新签名 (无 ack/flag 参数)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
+#define LOTSPEED_OLD_CONG_CONTROL_API
+#endif
+
 #define LOTSPEED_BETA_SCALE 1024
 #define LOTSPEED_PROBE_RTT_INTERVAL_MS 10000
 #define LOTSPEED_PROBE_RTT_DURATION_MS 500
@@ -386,7 +391,7 @@ static void lotspeed_adapt_and_control(struct sock *sk, const struct rate_sample
         rtt_us = ca->rtt_min ? ca->rtt_min : 1000;
     base_rtt = ca->rtt_min ? ca->rtt_min : rtt_us;
     high_delay_path = lotserver_hd_enable && base_rtt >= lotserver_hd_thresh_us;
-    brave_active = lotserver_brave_enable && time_before(now_jif, ca->brave_freeze_until);
+    brave_active = lotserver_brave_enable && time_before((unsigned long)now_jif, (unsigned long)ca->brave_freeze_until);
 
     // 定期进入 PROBE_RTT 刷新基准 RTT
     if (ca->state != PROBE_RTT &&
@@ -491,7 +496,7 @@ out_pacing:
 #endif
 }
 
-#ifdef LOTSPEED_NEW_CONG_CONTROL_API
+#ifdef LOTSPEED_OLD_CONG_CONTROL_API
 static void lotspeed_cong_control(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs)
 {
     lotspeed_adapt_and_control(sk, rs, flag);
