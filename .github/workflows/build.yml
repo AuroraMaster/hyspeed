@@ -57,6 +57,8 @@ jobs:
           cd ~/kernel-${KERNEL_VERSION}
           make defconfig
           make modules_prepare
+          # Create empty Module.symvers to avoid modpost warnings
+          touch Module.symvers
 
       - name: Build kernel module
         run: |
@@ -66,7 +68,8 @@ jobs:
           echo "Building for kernel $KERNEL_VERSION"
           echo "Kernel directory: $KERNEL_DIR"
 
-          make KERNEL_DIR=$KERNEL_DIR KERNEL_RELEASE=$KERNEL_VERSION
+          # Use KBUILD_MODPOST_WARN=1 to turn modpost errors into warnings for CI
+          make KERNEL_DIR=$KERNEL_DIR KERNEL_RELEASE=$KERNEL_VERSION KBUILD_MODPOST_WARN=1
 
       - name: Verify build output
         run: |

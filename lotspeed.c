@@ -30,15 +30,15 @@
 
 // 检测 cong_control API 版本
 // - 4.13 之前: void (*)(struct sock *, u32, int, const struct rate_sample *)
-// - 4.13 到 6.11: void (*)(struct sock *, const struct rate_sample *)
-// - 6.12+: void (*)(struct sock *, u32, int, const struct rate_sample *)
+// - 4.13 到 6.10: void (*)(struct sock *, const struct rate_sample *)
+// - 6.11+: void (*)(struct sock *, u32, int, const struct rate_sample *)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
 #define LOTSPEED_OLD_CONG_CONTROL_API
 #endif
 
 #ifdef LOTSPEED_NEW_CONG_CONTROL_API
-// 6.12+ 使用带 ack/flag 参数的新 API (由 Makefile 定义)
-#define LOTSPEED_612_CONG_CONTROL_API
+// 6.11+ 使用带 ack/flag 参数的新 API (由 Makefile 定义)
+#define LOTSPEED_611_CONG_CONTROL_API
 #endif
 
 #define LOTSPEED_BETA_SCALE 1024
@@ -518,14 +518,14 @@ static void lotspeed_cong_control(struct sock *sk, u32 ack, int flag, const stru
 {
     lotspeed_adapt_and_control(sk, rs, flag);
 }
-#elif defined(LOTSPEED_612_CONG_CONTROL_API)
-// Linux 6.12+: 新 API 又带回 ack/flag 参数
+#elif defined(LOTSPEED_611_CONG_CONTROL_API)
+// Linux 6.11+: 新 API 又带回 ack/flag 参数
 static void lotspeed_cong_control(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs)
 {
     lotspeed_adapt_and_control(sk, rs, flag);
 }
 #else
-// Linux 4.13 - 6.11: 简化 API 无 ack/flag 参数
+// Linux 4.13 - 6.10: 简化 API 无 ack/flag 参数
 static void lotspeed_cong_control(struct sock *sk, const struct rate_sample *rs)
 {
     lotspeed_adapt_and_control(sk, rs, 0);
