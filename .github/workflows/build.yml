@@ -14,9 +14,10 @@ jobs:
       fail-fast: false
       matrix:
         kernel_version:
-          - "6.12.8"   # Latest stable, change to your preferred version
-          - "6.11.0"
-          - "5.15.0"   # LTS
+          - "6.18.2" # LTS
+          - "6.12.8"
+          - "6.11.9"
+          - "5.15.99"
 
     steps:
       - name: Checkout code
