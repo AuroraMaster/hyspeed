@@ -5,6 +5,13 @@
 </div>
 
 
+### supported kernel
+
+* kernel_version:
+    - "6.18.2" # LTS
+    - "6.12.8"
+    - "6.11.9"
+    - "5.15.99"
 
 ### branch explanation
 
