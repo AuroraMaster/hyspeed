@@ -5,7 +5,9 @@ TAR             ?= tar
 obj-m           += lotspeed.o
 
 ccflags-y := -std=gnu99
-ifneq ($(shell printf '%s\n6.12.0\n$(KERNEL_RELEASE)' | sort -V | head -n1),6.12.0)
+# 检测内核版本 >= 6.12.0 时定义 LOTSPEED_NEW_CONG_CONTROL_API
+# sort -V 会将较小的版本排在前面，如果 6.12.0 排在前面说明 KERNEL_RELEASE >= 6.12.0
+ifeq ($(shell printf '%s\n%s\n' '6.12.0' '$(KERNEL_RELEASE)' | sort -V | head -n1),6.12.0)
 ccflags-y += -DLOTSPEED_NEW_CONG_CONTROL_API
 endif
 

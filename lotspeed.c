@@ -28,9 +28,17 @@
 
 #define SAFE_DIV64(n, d) ((d) ? div64_u64((n), (d)) : 0)
 
-// 检测 cong_control API 版本：4.13+ 使用新签名 (无 ack/flag 参数)
+// 检测 cong_control API 版本
+// - 4.13 之前: void (*)(struct sock *, u32, int, const struct rate_sample *)
+// - 4.13 到 6.11: void (*)(struct sock *, const struct rate_sample *)
+// - 6.12+: void (*)(struct sock *, u32, int, const struct rate_sample *)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
 #define LOTSPEED_OLD_CONG_CONTROL_API
+#endif
+
+#ifdef LOTSPEED_NEW_CONG_CONTROL_API
+// 6.12+ 使用带 ack/flag 参数的新 API (由 Makefile 定义)
+#define LOTSPEED_612_CONG_CONTROL_API
 #endif
 
 #define LOTSPEED_BETA_SCALE 1024
@@ -258,9 +266,17 @@ static void lotspeed_init(struct sock *sk)
                 if (age_ms < (u64)lotserver_hist_ttl_sec * 1000 &&
                     hist->sample_cnt >= lotserver_hist_min_samples &&
                     hist->rtt_min_us > 0) {
+                    u32 init_cwnd;
                     ca->rtt_min = hist->rtt_min_us;
-                    tp->snd_cwnd = clamp_t(u32, hist->rtt_min_us ? SAFE_DIV64(hist->bw_bytes_sec * hist->rtt_min_us, (u64)tp->mss_cache * 1000000ULL) : lotserver_min_cwnd,
-                                           lotserver_min_cwnd, lotserver_max_cwnd);
+                    // 计算初始 cwnd，避免在 clamp_t 内使用复杂三元表达式
+                    if (hist->rtt_min_us && tp->mss_cache) {
+                        u64 bw_cwnd = div64_u64(hist->bw_bytes_sec * hist->rtt_min_us,
+                                                (u64)tp->mss_cache * 1000000ULL);
+                        init_cwnd = (u32)min_t(u64, bw_cwnd, UINT_MAX);
+                    } else {
+                        init_cwnd = lotserver_min_cwnd;
+                    }
+                    tp->snd_cwnd = clamp_t(u32, init_cwnd, lotserver_min_cwnd, lotserver_max_cwnd);
                     ca->ss_mode = false;
                     ca->state = FAST_CA;
                 }
@@ -497,11 +513,19 @@ out_pacing:
 }
 
 #ifdef LOTSPEED_OLD_CONG_CONTROL_API
+// Linux < 4.13: 旧 API 带 ack/flag 参数
+static void lotspeed_cong_control(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs)
+{
+    lotspeed_adapt_and_control(sk, rs, flag);
+}
+#elif defined(LOTSPEED_612_CONG_CONTROL_API)
+// Linux 6.12+: 新 API 又带回 ack/flag 参数
 static void lotspeed_cong_control(struct sock *sk, u32 ack, int flag, const struct rate_sample *rs)
 {
     lotspeed_adapt_and_control(sk, rs, flag);
 }
 #else
+// Linux 4.13 - 6.11: 简化 API 无 ack/flag 参数
 static void lotspeed_cong_control(struct sock *sk, const struct rate_sample *rs)
 {
     lotspeed_adapt_and_control(sk, rs, 0);
