@@ -5,6 +5,11 @@ TAR             ?= tar
 obj-m           += lotspeed.o
 
 ccflags-y := -std=gnu99
+
+# 抑制一些编译器警告，保持 gcc/clang 兼容
+ccflags-y += -Wno-declaration-after-statement
+ccflags-y += -Wno-unused-function
+
 # 检测内核版本 >= 6.11.0 时定义 LOTSPEED_NEW_CONG_CONTROL_API
 # 6.11+ 的 cong_control 签名变为 (sk, ack, flag, rs)
 ifeq ($(shell printf '%s\n%s\n' '6.11.0' '$(KERNEL_RELEASE)' | sort -V | head -n1),6.11.0)

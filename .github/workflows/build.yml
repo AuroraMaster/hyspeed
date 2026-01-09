@@ -14,7 +14,8 @@ jobs:
       fail-fast: false
       matrix:
         kernel_version:
-          - "6.18.2" # LTS
+          - "6.18.3" # LTS
+          - "6.18.2"
           - "6.12.8"
           - "6.11.9"
           - "5.15.99"

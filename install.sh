@@ -195,12 +195,24 @@ install_dependencies() {
             log_warn "Some packages may be missing, trying alternative..."
             yum install -y gcc make kernel-devel kernel-headers wget curl bc
         }
+        # 尝试安装 clang 作为备用编译器（如果 gcc 版本过旧）
+        local gcc_ver=$(gcc -dumpversion 2>/dev/null | cut -d. -f1)
+        if [[ -n "$gcc_ver" ]] && [[ "$gcc_ver" -lt 8 ]]; then
+            log_info "GCC version is old, installing clang as backup..."
+            yum install -y clang 2>/dev/null || log_warn "Could not install clang"
+        fi
     elif [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
         apt-get update >/dev/null 2>&1
         apt-get install -y gcc make linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
             log_warn "Some packages may be missing, trying alternative..."
             apt-get install -y gcc make linux-headers-generic wget curl bc
         }
+        # 尝试安装 clang 作为备用编译器（如果 gcc 版本过旧）
+        local gcc_ver=$(gcc -dumpversion 2>/dev/null | cut -d. -f1)
+        if [[ -n "$gcc_ver" ]] && [[ "$gcc_ver" -lt 8 ]]; then
+            log_info "GCC version is old, installing clang as backup..."
+            apt-get install -y clang 2>/dev/null || log_warn "Could not install clang"
+        fi
     fi
 
     log_success "Dependencies installed"
@@ -219,39 +231,49 @@ download_source() {
         exit 1
     }
 
-    # 创建 Makefile
-    cat > Makefile << 'EOF'
-obj-m += lotspeed.o
-
-KERNELDIR ?= /lib/modules/$(shell uname -r)/build
-
-ccflags-y := -std=gnu99
-ifneq ($(shell printf '%s\n6.12.0\n$(KERNEL_RELEASE)' | sort -V | head -n1),6.12.0)
-ccflags-y += -DLOTSPEED_NEW_CONG_CONTROL_API
-endif
-
-PWD := $(shell pwd)
-
-all:
-	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
-
-clean:
-	$(MAKE) -C $(KERNELDIR) M=$(PWD) clean
-
-install: all
-	insmod lotspeed.ko
-	@echo "lotspeed" >> /etc/modules-load.d/lotspeed.conf 2>/dev/null || true
-	@cp lotspeed.ko /lib/modules/$(shell uname -r)/kernel/net/ipv4/ 2>/dev/null || true
-	@depmod -a
-
-uninstall:
-	-rmmod lotspeed 2>/dev/null
-	@rm -f /etc/modules-load.d/lotspeed.conf
-	@rm -f /lib/modules/$(shell uname -r)/kernel/net/ipv4/lotspeed.ko
-	@depmod -a
-EOF
+    # 下载 Makefile
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/Makefile" -o Makefile || {
+        log_error "Failed to download Makefile"
+        exit 1
+    }
 
     log_success "Source code downloaded"
+}
+
+detect_compiler() {
+    # 检测可用的编译器
+    local gcc_version=""
+    local clang_version=""
+    local preferred_cc=""
+
+    if command -v gcc &>/dev/null; then
+        gcc_version=$(gcc -dumpversion 2>/dev/null | cut -d. -f1)
+        log_info "Detected GCC version: $gcc_version"
+    fi
+
+    if command -v clang &>/dev/null; then
+        clang_version=$(clang --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        log_info "Detected Clang version: $clang_version"
+    fi
+
+    # 优先使用 gcc，但如果版本过旧（<8）且有 clang，使用 clang
+    if [[ -n "$gcc_version" ]]; then
+        if [[ "$gcc_version" -ge 8 ]]; then
+            preferred_cc="gcc"
+        elif [[ -n "$clang_version" ]]; then
+            log_warn "GCC version $gcc_version is old, using Clang instead"
+            preferred_cc="clang"
+        else
+            preferred_cc="gcc"
+        fi
+    elif [[ -n "$clang_version" ]]; then
+        preferred_cc="clang"
+    else
+        log_error "No C compiler found. Please install gcc or clang."
+        exit 1
+    fi
+
+    echo "$preferred_cc"
 }
 
 compile_module() {
@@ -260,9 +282,48 @@ compile_module() {
     cd $INSTALL_DIR
     make clean >/dev/null 2>&1
 
-    if ! make >/dev/null 2>&1; then
-        log_error "Compilation failed. Checking error..."
-        make 2>&1 | tail -20
+    local compiler=$(detect_compiler)
+    local compile_success=0
+    local compile_output=""
+
+    # 第一次尝试：使用检测到的编译器
+    log_info "Trying compilation with $compiler..."
+    if [[ "$compiler" == "clang" ]]; then
+        compile_output=$(make CC=clang 2>&1)
+        if [[ $? -eq 0 ]] && [[ -f lotspeed.ko ]]; then
+            compile_success=1
+        fi
+    else
+        compile_output=$(make 2>&1)
+        if [[ $? -eq 0 ]] && [[ -f lotspeed.ko ]]; then
+            compile_success=1
+        fi
+    fi
+
+    # 如果 gcc 编译失败，检查是否是不支持的选项错误，尝试 clang
+    if [[ $compile_success -eq 0 ]]; then
+        if echo "$compile_output" | grep -qE "unrecognized command-line option|unknown argument"; then
+            log_warn "Compiler option error detected, trying with clang..."
+            if command -v clang &>/dev/null; then
+                make clean >/dev/null 2>&1
+                compile_output=$(make CC=clang 2>&1)
+                if [[ $? -eq 0 ]] && [[ -f lotspeed.ko ]]; then
+                    compile_success=1
+                    log_success "Compilation succeeded with clang"
+                fi
+            fi
+        fi
+    fi
+
+    # 如果仍然失败，显示错误信息
+    if [[ $compile_success -eq 0 ]]; then
+        log_error "Compilation failed. Error output:"
+        echo "$compile_output" | tail -30
+        echo ""
+        log_error "Possible solutions:"
+        echo "  1. Update your gcc to version 8 or higher"
+        echo "  2. Install clang: apt install clang (Debian/Ubuntu) or yum install clang (CentOS)"
+        echo "  3. Check if kernel headers are properly installed"
         exit 1
     fi
 
