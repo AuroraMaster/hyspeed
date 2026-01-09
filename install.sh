@@ -836,6 +836,105 @@ case "$ACTION" in
 
         # 删除自己
         rm -f /usr/local/bin/lotspeed
+        rm -f /etc/lotspeed/config.conf
+        rm -f /etc/systemd/system/lotspeed-config.service
+        systemctl daemon-reload 2>/dev/null || true
+        ;;
+    save)
+        CONFIG_DIR="/etc/lotspeed"
+        CONFIG_FILE="$CONFIG_DIR/config.conf"
+
+        mkdir -p "$CONFIG_DIR"
+
+        print_box_top "${GREEN}"
+        print_box_row "Saving LotSpeed Configuration" "center" "${GREEN}"
+        print_box_div "${GREEN}"
+
+        if [[ ! -d /sys/module/lotspeed/parameters ]]; then
+            print_box_row "${RED}Error: Module not loaded${NC}" "center" "${GREEN}"
+            print_box_bottom "${GREEN}"
+            exit 1
+        fi
+
+        # 保存所有参数到配置文件
+        echo "# LotSpeed Configuration" > "$CONFIG_FILE"
+        echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$CONFIG_FILE"
+        echo "" >> "$CONFIG_FILE"
+
+        for param in lotserver_rate lotserver_min_cwnd lotserver_max_cwnd lotserver_beta \
+                     lotserver_turbo lotserver_safe_mode lotserver_fast_alpha lotserver_fast_gamma \
+                     lotserver_fast_ss_exit lotserver_hd_enable lotserver_hd_thresh_us \
+                     lotserver_hd_ref_us lotserver_hd_gamma_boost lotserver_hd_alpha_boost \
+                     lotserver_brave_enable lotserver_brave_rtt_pct lotserver_brave_hold_ms \
+                     lotserver_brave_floor_pct lotserver_brave_push_pct; do
+            param_file="/sys/module/lotspeed/parameters/$param"
+            if [[ -f "$param_file" ]]; then
+                value=$(cat "$param_file" 2>/dev/null)
+                echo "$param=$value" >> "$CONFIG_FILE"
+            fi
+        done
+
+        print_kv_row "Config File" "$CONFIG_FILE" "${GREEN}"
+
+        # 创建 systemd 服务以在启动时恢复配置
+        cat > /etc/systemd/system/lotspeed-config.service << 'SERVICE_EOF'
+[Unit]
+Description=LotSpeed Configuration Restore
+After=network.target
+ConditionPathExists=/sys/module/lotspeed/parameters
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lotspeed load
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+        systemctl daemon-reload
+        systemctl enable lotspeed-config.service 2>/dev/null
+
+        print_kv_row "Systemd Service" "Enabled" "${GREEN}"
+        print_box_div "${GREEN}"
+        print_box_row "Config will be restored on reboot" "center" "${GREEN}"
+        print_box_bottom "${GREEN}"
+        ;;
+    load)
+        CONFIG_FILE="/etc/lotspeed/config.conf"
+
+        print_box_top "${CYAN}"
+        print_box_row "Loading LotSpeed Configuration" "center" "${CYAN}"
+        print_box_div "${CYAN}"
+
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            print_box_row "${RED}Error: Config file not found${NC}" "center" "${CYAN}"
+            print_box_row "Run 'lotspeed save' first" "center" "${CYAN}"
+            print_box_bottom "${CYAN}"
+            exit 1
+        fi
+
+        if [[ ! -d /sys/module/lotspeed/parameters ]]; then
+            print_box_row "${RED}Error: Module not loaded${NC}" "center" "${CYAN}"
+            print_box_bottom "${CYAN}"
+            exit 1
+        fi
+
+        # 从配置文件加载参数
+        load_count=0
+        while IFS='=' read -r param value; do
+            # 跳过注释和空行
+            [[ "$param" =~ ^#.*$ ]] && continue
+            [[ -z "$param" ]] && continue
+
+            param_file="/sys/module/lotspeed/parameters/$param"
+            if [[ -f "$param_file" ]]; then
+                echo "$value" > "$param_file" 2>/dev/null && load_count=$((load_count + 1))
+            fi
+        done < "$CONFIG_FILE"
+
+        print_kv_row "Parameters Loaded" "$load_count" "${CYAN}"
+        print_box_bottom "${CYAN}"
         ;;
     *)
         print_box_top
@@ -847,6 +946,8 @@ case "$ACTION" in
         print_kv_row "status" "Check Status"
         print_kv_row "preset [name]" "Apply Preset"
         print_kv_row "set [k] [v]" "Set Parameter"
+        print_kv_row "save" "Save Config (persist reboot)"
+        print_kv_row "load" "Load Saved Config"
         print_kv_row "monitor" "Live Logs"
         print_kv_row "uninstall" "Remove Completely"
         print_box_div
