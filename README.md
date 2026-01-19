@@ -112,7 +112,7 @@ dmesg -w
 
 
 <div align=center>
-    <img src="https://github.com/uk0/lotspeed/blob/ml-tcp/zeta-tcp.png" width="1024" height="768" />
+    <img src="https://github.com/uk0/lotspeed/blob/ml-tcp/test1.png" width="1024" height="768" />
 </div>
 
 
