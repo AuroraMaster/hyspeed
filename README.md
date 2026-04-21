@@ -1,7 +1,7 @@
-### lotspeed ml-tcp
+### hyspeed ml-tcp
 
 <div align=center>
-    <img src="https://github.com/uk0/lotspeed/blob/ml-tcp/logo.png" width="400" height="400" />
+    <img src="https://github.com/AuroraMaster/hyspeed/blob/main/logo.png" width="400" height="400" />
 </div>
 
 
@@ -13,18 +13,18 @@
     - "6.11.9"
     - "5.15.99"
 
-### branch explanation
+### project profile
 
-* `ml-tcp`: lotspeed ml-tcp 基于学习历史记录的模式进行加速，并且洲际场景抖动不会降速避让。
+* `main`: hyspeed 基于学习历史记录、RTT 噪声过滤和高延迟补偿进行加速，并且洲际场景抖动不会立即降速避让。
 
 
 * auto install
 
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/AuroraMaster/hyspeed/main/install.sh | sudo bash
 #   or
-wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/AuroraMaster/hyspeed/main/install.sh | sudo bash
 ```
 
 
@@ -34,15 +34,15 @@ wget -qO- https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sud
 
 # 下载代码/编译
 
-git clone https://github.com/uk0/lotspeed.git 
+git clone https://github.com/AuroraMaster/hyspeed.git
 
-cd lotspeed && make
+cd hyspeed && make
 
 # 加载模块
-sudo insmod lotspeed.ko
+sudo insmod hyspeed.ko
 
 # 设置为当前拥塞控制算法
-sudo sysctl -w net.ipv4.tcp_congestion_control=lotspeed
+sudo sysctl -w net.ipv4.tcp_congestion_control=hyspeed
 sudo sysctl -w net.ipv4.tcp_no_metrics_save=1
 
 # 查看是否生效
@@ -54,18 +54,18 @@ dmesg -w
 ```
 
 
-* helper （lotserver_beta越小强的越凶，建议大雨620否则会导致CPU飙高）
+* helper （hyspeed_beta越小强的越凶，建议大雨620否则会导致CPU飙高）
 
 ```bash
 
-[cce ~]$ lotspeed status
+[cce ~]$ hyspeed status
 ╔════════════════════════════════════════════════════════════════════╗
-║                   LotSpeed v5.6 Status (ML-TCP)                    ║
+║                   HySpeed v5.6 Status (ML-TCP)                    ║
 ╟────────────────────────────────────────────────────────────────────╢
 ║ Module Status                                               Loaded ║
 ║ Reference Count                                                  1 ║
 ║ Active Connections                                              00 ║
-║ Active Algorithm                                          lotspeed ║
+║ Active Algorithm                                          hyspeed ║
 ╟────────────────────────────────────────────────────────────────────╢
 ║                         Current Parameters                         ║
 ╟────────────────────────────────────────────────────────────────────╢
@@ -89,13 +89,13 @@ dmesg -w
 ║ Brave Floor                                                    85% ║
 ║ Brave Push                                                      8% ║
 ╚════════════════════════════════════════════════════════════════════╝
-[cce ~]$ lotspeed help
+[cce ~]$ hyspeed help
 ╔════════════════════════════════════════════════════════════════════╗
-║                      LotSpeed v5.6 Management                      ║
+║                      HySpeed v5.6 Management                      ║
 ╟────────────────────────────────────────────────────────────────────╢
-║ start                                               Start LotSpeed ║
-║ stop                                                 Stop LotSpeed ║
-║ restart                                           Restart LotSpeed ║
+║ start                                               Start HySpeed ║
+║ stop                                                 Stop HySpeed ║
+║ restart                                           Restart HySpeed ║
 ║ status                                                Check Status ║
 ║ preset [name]                                         Apply Preset ║
 ║ set [k] [v]                                          Set Parameter ║
@@ -112,7 +112,7 @@ dmesg -w
 
 
 <div align=center>
-    <img src="https://github.com/uk0/lotspeed/blob/ml-tcp/test1.png" width="1024" height="768" />
+    <img src="https://github.com/AuroraMaster/hyspeed/blob/main/test1.png" width="1024" height="768" />
 </div>
 
 
@@ -126,8 +126,8 @@ sudo tc qdisc add dev ens3 root netem loss 16%
 sudo tc qdisc add dev eth0 root netem loss 16%
 
 #取消丢包
-sudo tc qdisc del dev ens3 root netem 
-sudo tc qdisc del dev eth0 root netem 
+sudo tc qdisc del dev ens3 root netem
+sudo tc qdisc del dev eth0 root netem
 
 # test command
 iperf3 -4 -s -p 35201
@@ -157,7 +157,7 @@ iperf3 -c green1 -p 35201 -R -t 30
 PAC (Proactive ACK Control) for TCP Incast Congestion
 ==========================================
 
-* https://github.com/uk0/TCP-Incast/tree/zeta-tcp 
+* https://github.com/uk0/TCP-Incast/tree/zeta-tcp
 
 
 
@@ -166,4 +166,4 @@ PAC (Proactive ACK Control) for TCP Incast Congestion
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=uk0/lotspeed&type=timeline&logscale&legend=top-left)](https://www.star-history.com/#uk0/lotspeed&type=timeline&logscale&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=AuroraMaster/hyspeed&type=timeline&logscale&legend=top-left)](https://www.star-history.com/#AuroraMaster/hyspeed&type=timeline&logscale&legend=top-left)

@@ -8,7 +8,7 @@
 
 [tapac](tapac) 通过一些资料整理出来的 加速方案 不是很好用
 
-[tapv2](tapv2) 搜索lotServer 使用的相关技术使用Gemini构建
+[tapv2](tapv2) 搜索hyServer 使用的相关技术使用Gemini构建
 
 [zeta-tcp-ml](zeta-tcp-ml) 算是比较好用的一个版本 目前还有点小问题。
  
@@ -68,7 +68,7 @@ LOGO=ubuntu-logo
 
 ![img_4.png](img/img_4.png)
 
-### lotspeed
+### hyspeed
 
 ![img_5.png](img/img_5.png)
 

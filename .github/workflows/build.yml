@@ -2,7 +2,7 @@ name: Build Kernel Module
 
 on:
   push:
-    branches: [ main, ml-tcp ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -13,6 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        compiler: [gcc, clang]
         kernel_version:
           - "6.18.4" # LTS
           - "6.18.3"
@@ -29,7 +30,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev
+          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev clang lld llvm shellcheck
 
       - name: Cache kernel source
         uses: actions/cache@v4
@@ -70,24 +71,35 @@ jobs:
 
           echo "Building for kernel $KERNEL_VERSION"
           echo "Kernel directory: $KERNEL_DIR"
+          echo "Compiler: ${{ matrix.compiler }}"
 
           # Use KBUILD_MODPOST_WARN=1 to turn modpost errors into warnings for CI
-          make KERNEL_DIR=$KERNEL_DIR KERNEL_RELEASE=$KERNEL_VERSION KBUILD_MODPOST_WARN=1
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            make KERNEL_DIR=$KERNEL_DIR KERNEL_RELEASE=$KERNEL_VERSION KBUILD_MODPOST_WARN=1 \
+              LLVM=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+          else
+            make KERNEL_DIR=$KERNEL_DIR KERNEL_RELEASE=$KERNEL_VERSION KBUILD_MODPOST_WARN=1
+          fi
 
       - name: Verify build output
         run: |
-          if [ -f lotspeed.ko ]; then
+          if [ -f hyspeed.ko ]; then
             echo "Build successful!"
-            file lotspeed.ko
-            modinfo lotspeed.ko || true
+            file hyspeed.ko
+            modinfo hyspeed.ko || true
           else
-            echo "Build failed: lotspeed.ko not found"
+            echo "Build failed: hyspeed.ko not found"
             exit 1
           fi
+
+      - name: Validate install script
+        run: |
+          bash -n install.sh
+          shellcheck -S warning install.sh || true
 
       - name: Upload kernel module artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lotspeed-${{ matrix.kernel_version }}
-          path: lotspeed.ko
+          name: hyspeed-${{ matrix.kernel_version }}-${{ matrix.compiler }}
+          path: hyspeed.ko
           retention-days: 7

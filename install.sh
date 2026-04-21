@@ -1,20 +1,20 @@
 #!/bin/bash
 #
-# LotSpeed v5.6 - ml-tcp Auto-Scaling Edition (UI Enhanced)
-# Author: uk0 @ 2025-11-23
-# GitHub: https://github.com/uk0/lotspeed
+# HySpeed v5.6 - ml-tcp Auto-Scaling Edition (UI Enhanced)
+# Author: AuroraMaster
+# GitHub: https://github.com/AuroraMaster/hyspeed
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/uk0/lotspeed/ml-tcp/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/AuroraMaster/hyspeed/main/install.sh | sudo bash
 #
 
 set -e
 
 # ================= 配置区域 =================
-GITHUB_REPO="uk0/lotspeed"
-GITHUB_BRANCH="ml-tcp"
-INSTALL_DIR="/opt/lotspeed"
-MODULE_NAME="lotspeed"
+GITHUB_REPO="AuroraMaster/hyspeed"
+GITHUB_BRANCH="main"
+INSTALL_DIR="/opt/hyspeed"
+MODULE_NAME="hyspeed"
 VERSION="5.6"
 CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 CURRENT_USER=$(whoami)
@@ -203,10 +203,14 @@ install_dependencies() {
         fi
     elif [[ "$OS" == "debian" ]] || [[ "$OS" == "ubuntu" ]]; then
         apt-get update >/dev/null 2>&1
-        apt-get install -y gcc make linux-headers-$(uname -r) wget curl bc 2>/dev/null || {
+        apt-get install -y gcc make linux-headers-$(uname -r) wget curl bc kmod 2>/dev/null || {
             log_warn "Some packages may be missing, trying alternative..."
-            apt-get install -y gcc make linux-headers-generic wget curl bc
+            apt-get install -y gcc make linux-headers-generic wget curl bc kmod
         }
+        if grep -qi clang /proc/version 2>/dev/null; then
+            log_info "Kernel was built with Clang, installing LLVM toolchain helpers..."
+            apt-get install -y clang lld llvm 2>/dev/null || log_warn "Could not install generic LLVM packages"
+        fi
         # 尝试安装 clang 作为备用编译器（如果 gcc 版本过旧）
         local gcc_ver=$(gcc -dumpversion 2>/dev/null | cut -d. -f1)
         if [[ -n "$gcc_ver" ]] && [[ "$gcc_ver" -lt 8 ]]; then
@@ -218,16 +222,69 @@ install_dependencies() {
     log_success "Dependencies installed"
 }
 
+find_versioned_tool() {
+    local base="$1"
+    local major="$2"
+
+    if [[ -n "$major" ]] && command -v "${base}-${major}" &>/dev/null; then
+        command -v "${base}-${major}"
+        return 0
+    fi
+
+    command -v "$base" 2>/dev/null || true
+}
+
+kernel_clang_major() {
+    local version_line=""
+    version_line=$(cat /proc/version 2>/dev/null || true)
+    echo "$version_line" | grep -qi clang || return 1
+    echo "$version_line" | grep -oE 'clang version [0-9]+' | awk '{print $3}' | head -1
+}
+
+llvm_make_args() {
+    local clang_major="$1"
+    local clang_bin ld_bin ar_bin nm_bin objcopy_bin objdump_bin strip_bin
+
+    clang_bin=$(find_versioned_tool clang "$clang_major")
+    [[ -n "$clang_bin" ]] || return 1
+
+    ld_bin=$(find_versioned_tool ld.lld "$clang_major")
+    ar_bin=$(find_versioned_tool llvm-ar "$clang_major")
+    nm_bin=$(find_versioned_tool llvm-nm "$clang_major")
+    objcopy_bin=$(find_versioned_tool llvm-objcopy "$clang_major")
+    objdump_bin=$(find_versioned_tool llvm-objdump "$clang_major")
+    strip_bin=$(find_versioned_tool llvm-strip "$clang_major")
+
+    printf 'LLVM=1 CC=%q' "$clang_bin"
+    [[ -n "$ld_bin" ]] && printf ' LD=%q' "$ld_bin"
+    [[ -n "$ar_bin" ]] && printf ' AR=%q' "$ar_bin"
+    [[ -n "$nm_bin" ]] && printf ' NM=%q' "$nm_bin"
+    [[ -n "$objcopy_bin" ]] && printf ' OBJCOPY=%q' "$objcopy_bin"
+    [[ -n "$objdump_bin" ]] && printf ' OBJDUMP=%q' "$objdump_bin"
+    [[ -n "$strip_bin" ]] && printf ' STRIP=%q' "$strip_bin"
+}
+
+run_make_capture() {
+    local make_cmd="$1"
+    local rc
+
+    set +e
+    compile_output=$(eval "$make_cmd" 2>&1)
+    rc=$?
+    set -e
+    return $rc
+}
+
 download_source() {
-    log_info "Downloading LotSpeed v$VERSION source code..."
+    log_info "Downloading HySpeed v$VERSION source code..."
 
     # 创建安装目录
     mkdir -p $INSTALL_DIR
     cd $INSTALL_DIR
 
     # 下载源代码
-    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/lotspeed.c" -o lotspeed.c || {
-        log_error "Failed to download lotspeed.c"
+    curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPO/$GITHUB_BRANCH/hyspeed.c" -o hyspeed.c || {
+        log_error "Failed to download hyspeed.c"
         exit 1
     }
 
@@ -277,7 +334,7 @@ detect_compiler() {
 }
 
 compile_module() {
-    log_info "Compiling LotSpeed v$VERSION kernel module..."
+    log_info "Compiling HySpeed v$VERSION kernel module..."
 
     cd $INSTALL_DIR
     make clean >/dev/null 2>&1
@@ -285,18 +342,34 @@ compile_module() {
     local compiler=$(detect_compiler)
     local compile_success=0
     local compile_output=""
+    local clang_major=""
+    local llvm_args=""
+
+    clang_major=$(kernel_clang_major || true)
+    if [[ -n "$clang_major" ]]; then
+        llvm_args=$(llvm_make_args "$clang_major" || true)
+        if [[ -n "$llvm_args" ]]; then
+            log_info "Kernel was built with Clang $clang_major; trying LLVM build first..."
+            if run_make_capture "make $llvm_args" && [[ -f hyspeed.ko ]]; then
+                compile_success=1
+            else
+                log_warn "LLVM build did not succeed, falling back to compiler probing..."
+                make clean >/dev/null 2>&1
+            fi
+        fi
+    fi
 
     # 第一次尝试：使用检测到的编译器
-    log_info "Trying compilation with $compiler..."
-    if [[ "$compiler" == "clang" ]]; then
-        compile_output=$(make CC=clang 2>&1)
-        if [[ $? -eq 0 ]] && [[ -f lotspeed.ko ]]; then
-            compile_success=1
-        fi
-    else
-        compile_output=$(make 2>&1)
-        if [[ $? -eq 0 ]] && [[ -f lotspeed.ko ]]; then
-            compile_success=1
+    if [[ $compile_success -eq 0 ]]; then
+        log_info "Trying compilation with $compiler..."
+        if [[ "$compiler" == "clang" ]]; then
+            if run_make_capture "make CC=clang" && [[ -f hyspeed.ko ]]; then
+                compile_success=1
+            fi
+        else
+            if run_make_capture "make" && [[ -f hyspeed.ko ]]; then
+                compile_success=1
+            fi
         fi
     fi
 
@@ -304,10 +377,15 @@ compile_module() {
     if [[ $compile_success -eq 0 ]]; then
         if echo "$compile_output" | grep -qE "unrecognized command-line option|unknown argument"; then
             log_warn "Compiler option error detected, trying with clang..."
-            if command -v clang &>/dev/null; then
+            if [[ -n "$llvm_args" ]]; then
                 make clean >/dev/null 2>&1
-                compile_output=$(make CC=clang 2>&1)
-                if [[ $? -eq 0 ]] && [[ -f lotspeed.ko ]]; then
+                if run_make_capture "make $llvm_args" && [[ -f hyspeed.ko ]]; then
+                    compile_success=1
+                    log_success "Compilation succeeded with LLVM toolchain"
+                fi
+            elif command -v clang &>/dev/null; then
+                make clean >/dev/null 2>&1
+                if run_make_capture "make CC=clang" && [[ -f hyspeed.ko ]]; then
                     compile_success=1
                     log_success "Compilation succeeded with clang"
                 fi
@@ -322,13 +400,13 @@ compile_module() {
         echo ""
         log_error "Possible solutions:"
         echo "  1. Update your gcc to version 8 or higher"
-        echo "  2. Install clang: apt install clang (Debian/Ubuntu) or yum install clang (CentOS)"
+        echo "  2. Install clang/lld/llvm matching the kernel compiler"
         echo "  3. Check if kernel headers are properly installed"
         exit 1
     fi
 
-    if [[ ! -f lotspeed.ko ]]; then
-        log_error "Module compilation failed - lotspeed.ko not found"
+    if [[ ! -f hyspeed.ko ]]; then
+        log_error "Module compilation failed - hyspeed.ko not found"
         exit 1
     fi
 
@@ -336,30 +414,33 @@ compile_module() {
 }
 
 load_module() {
-    log_info "Loading LotSpeed v$VERSION module..."
+    log_info "Loading HySpeed v$VERSION module..."
 
     # 卸载旧模块（如果存在）
-    rmmod lotspeed 2>/dev/null || true
+    rmmod hyspeed 2>/dev/null || true
+
+    install -D -m 0644 "$INSTALL_DIR/hyspeed.ko" "/lib/modules/$(uname -r)/extra/hyspeed.ko"
+    depmod -a
 
     # 加载新模块
-    insmod $INSTALL_DIR/lotspeed.ko || {
+    modprobe hyspeed || insmod "$INSTALL_DIR/hyspeed.ko" || {
         log_error "Failed to load module"
         dmesg | tail -10
         exit 1
     }
 
     # 设置为默认拥塞控制算法
-    sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null 2>&1
+    sysctl -w net.ipv4.tcp_congestion_control=hyspeed >/dev/null 2>&1
 
     # 持久化设置
-    if ! grep -q "net.ipv4.tcp_congestion_control=lotspeed" /etc/sysctl.conf; then
-        echo "net.ipv4.tcp_congestion_control=lotspeed" >> /etc/sysctl.conf
-    fi
+    cat > /etc/sysctl.d/99-hyspeed.conf <<'EOF'
+net.ipv4.tcp_congestion_control = hyspeed
+net.ipv4.tcp_no_metrics_save = 1
+EOF
+    sysctl -p /etc/sysctl.d/99-hyspeed.conf >/dev/null 2>&1 || true
 
     # 设置开机自动加载
-    echo "lotspeed" > /etc/modules-load.d/lotspeed.conf
-    cp $INSTALL_DIR/lotspeed.ko /lib/modules/$(uname -r)/kernel/net/ipv4/ 2>/dev/null || true
-    depmod -a
+    echo "hyspeed" > /etc/modules-load.d/hyspeed.conf
 
     log_success "Module loaded and set as default"
 }
@@ -369,12 +450,12 @@ create_management_script() {
     log_info "Creating management script..."
 
     # 使用 'SCRIPT_EOF' 避免变量在此时展开，而是在生成的脚本运行时展开
-    cat > /usr/local/bin/lotspeed << 'SCRIPT_EOF'
+    cat > /usr/local/bin/hyspeed << 'SCRIPT_EOF'
 #!/bin/bash
-# LotSpeed Management Script (Auto-Aligned UI)
+# HySpeed Management Script (Auto-Aligned UI)
 
 ACTION=$1
-INSTALL_DIR="/opt/lotspeed"
+INSTALL_DIR="/opt/hyspeed"
 VERSION="5.6"
 
 # 颜色
@@ -511,18 +592,18 @@ get_default_congestion_control() {
 
 show_status() {
     print_box_top
-    print_box_row "LotSpeed v$VERSION Status (ML-TCP)" "center"
+    print_box_row "HySpeed v$VERSION Status (ML-TCP)" "center"
     print_box_div
 
     # 检查模块状态
-    if lsmod | grep -q lotspeed; then
+    if lsmod | grep -q hyspeed; then
         print_kv_row "Module Status" "${GREEN}Loaded${NC}"
 
-        REF_COUNT=$(lsmod | grep lotspeed | awk '{print $3}')
+        REF_COUNT=$(lsmod | grep hyspeed | awk '{print $3}')
         print_kv_row "Reference Count" "${CYAN}$REF_COUNT${NC}"
 
         # 修复：确保 ACTIVE_CONNS 只是一个数字，没有换行
-        ACTIVE_CONNS=$(ss -tin 2>/dev/null | grep -c lotspeed || echo "0")
+        ACTIVE_CONNS=$(ss -tin 2>/dev/null | grep -c hyspeed || echo "0")
         # 去除可能的换行和空格
         ACTIVE_CONNS=$(echo $ACTIVE_CONNS | tr -d '\n' | tr -d ' ')
         print_kv_row "Active Connections" "${CYAN}$ACTIVE_CONNS${NC}"
@@ -534,8 +615,8 @@ show_status() {
 
     # 检查当前算法
     CURRENT=$(sysctl -n net.ipv4.tcp_congestion_control)
-    if [[ "$CURRENT" == "lotspeed" ]]; then
-        print_kv_row "Active Algorithm" "${GREEN}lotspeed${NC}"
+    if [[ "$CURRENT" == "hyspeed" ]]; then
+        print_kv_row "Active Algorithm" "${GREEN}hyspeed${NC}"
     else
         print_kv_row "Active Algorithm" "${YELLOW}$CURRENT${NC}"
     fi
@@ -544,93 +625,107 @@ show_status() {
     print_box_row "Current Parameters" "center"
     print_box_div
 
-    if [[ -d /sys/module/lotspeed/parameters ]]; then
-        for param in lotserver_rate lotserver_min_cwnd lotserver_max_cwnd lotserver_beta \
-                     lotserver_turbo lotserver_safe_mode lotserver_fast_alpha lotserver_fast_gamma \
-                     lotserver_fast_ss_exit lotserver_hd_enable lotserver_hd_thresh_us \
-                     lotserver_hd_ref_us lotserver_hd_gamma_boost lotserver_hd_alpha_boost \
-                     lotserver_brave_enable lotserver_brave_rtt_pct lotserver_brave_hold_ms \
-                     lotserver_brave_floor_pct lotserver_brave_push_pct; do
+    if [[ -d /sys/module/hyspeed/parameters ]]; then
+        for param in hyspeed_rate hyspeed_min_cwnd hyspeed_max_cwnd hyspeed_beta \
+                     hyspeed_turbo hyspeed_safe_mode hyspeed_fast_alpha hyspeed_fast_gamma \
+                     hyspeed_fast_ss_exit hyspeed_hd_enable hyspeed_hd_thresh_us \
+                     hyspeed_hd_ref_us hyspeed_hd_gamma_boost hyspeed_hd_alpha_boost \
+                     hyspeed_brave_enable hyspeed_brave_rtt_pct hyspeed_brave_hold_ms \
+                     hyspeed_brave_floor_pct hyspeed_brave_push_pct \
+                     hyspeed_rtt_filter_enable hyspeed_rtt_noise_pct hyspeed_rtt_trend_pct; do
 
-            param_file="/sys/module/lotspeed/parameters/$param"
+            param_file="/sys/module/hyspeed/parameters/$param"
             if [[ -f "$param_file" ]]; then
                 value=$(cat $param_file 2>/dev/null)
                 case $param in
-                    lotserver_rate)
+                    hyspeed_rate)
                         formatted=$(format_bytes $value)
                         bps=$(format_bps $value)
                         print_kv_row "Global Rate Limit" "$formatted ($bps)"
                         ;;
-                    lotserver_beta)
+                    hyspeed_beta)
                         beta_val=$((value * 100 / 1024))
                         print_kv_row "Fairness (Beta)" "${beta_val}%"
                         ;;
-                    lotserver_min_cwnd)
+                    hyspeed_min_cwnd)
                         print_kv_row "Min CWND" "$value packets"
                         ;;
-                    lotserver_max_cwnd)
+                    hyspeed_max_cwnd)
                         print_kv_row "Max CWND" "$value packets"
                         ;;
-                    lotserver_turbo)
+                    hyspeed_turbo)
                         if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
                             print_kv_row "Turbo Mode" "${YELLOW}Enabled ⚡${NC}"
                         else
                             print_kv_row "Turbo Mode" "Disabled"
                         fi
                         ;;
-                    lotserver_safe_mode)
+                    hyspeed_safe_mode)
                         if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
                             print_kv_row "Safe Mode" "${GREEN}Enabled${NC}"
                         else
                             print_kv_row "Safe Mode" "Disabled"
                         fi
                         ;;
-                    lotserver_fast_alpha)
+                    hyspeed_fast_alpha)
                         print_kv_row "FAST Alpha" "$value packets"
                         ;;
-                    lotserver_fast_gamma)
+                    hyspeed_fast_gamma)
                         print_kv_row "FAST Gamma" "${value}%"
                         ;;
-                    lotserver_fast_ss_exit)
+                    hyspeed_fast_ss_exit)
                         print_kv_row "SS Exit Threshold" "${value}%"
                         ;;
-                    lotserver_hd_enable)
+                    hyspeed_hd_enable)
                         if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
                             print_kv_row "High-Delay Mode" "${GREEN}Enabled${NC}"
                         else
                             print_kv_row "High-Delay Mode" "Disabled"
                         fi
                         ;;
-                    lotserver_hd_thresh_us)
+                    hyspeed_hd_thresh_us)
                         print_kv_row "HD Threshold" "${value}us"
                         ;;
-                    lotserver_hd_ref_us)
+                    hyspeed_hd_ref_us)
                         print_kv_row "HD Reference RTT" "${value}us"
                         ;;
-                    lotserver_hd_gamma_boost)
+                    hyspeed_hd_gamma_boost)
                         print_kv_row "HD Gamma Boost" "${value}%"
                         ;;
-                    lotserver_hd_alpha_boost)
+                    hyspeed_hd_alpha_boost)
                         print_kv_row "HD Alpha Boost" "$value packets"
                         ;;
-                    lotserver_brave_enable)
+                    hyspeed_brave_enable)
                         if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
                             print_kv_row "Brave Mode" "${GREEN}Enabled${NC}"
                         else
                             print_kv_row "Brave Mode" "Disabled"
                         fi
                         ;;
-                    lotserver_brave_rtt_pct)
+                    hyspeed_brave_rtt_pct)
                         print_kv_row "Brave RTT Tolerance" "${value}%"
                         ;;
-                    lotserver_brave_hold_ms)
+                    hyspeed_brave_hold_ms)
                         print_kv_row "Brave Hold Time" "${value}ms"
                         ;;
-                    lotserver_brave_floor_pct)
+                    hyspeed_brave_floor_pct)
                         print_kv_row "Brave Floor" "${value}%"
                         ;;
-                    lotserver_brave_push_pct)
+                    hyspeed_brave_push_pct)
                         print_kv_row "Brave Push" "${value}%"
+                        ;;
+                    hyspeed_rtt_filter_enable)
+                        if [[ "$value" == "Y" ]] || [[ "$value" == "1" ]]; then
+                            print_kv_row "RTT Filter" "${GREEN}Enabled${NC}"
+                        else
+                            print_kv_row "RTT Filter" "Disabled"
+                        fi
+                        ;;
+                    hyspeed_rtt_noise_pct)
+                        print_kv_row "RTT Noise Threshold" "${value}%"
+                        ;;
+                    hyspeed_rtt_trend_pct)
+                        print_kv_row "RTT Trend Threshold" "${value}%"
                         ;;
                 esac
             fi
@@ -644,7 +739,7 @@ apply_preset() {
 
     # 模拟设置参数 (实际写入 sysfs)
     set_val() {
-        echo $2 > /sys/module/lotspeed/parameters/$1 2>/dev/null
+        echo $2 > /sys/module/hyspeed/parameters/$1 2>/dev/null
     }
 
     print_box_top
@@ -653,49 +748,58 @@ apply_preset() {
 
     case $PRESET in
         conservative)
-            set_val lotserver_rate 125000000
-            set_val lotserver_min_cwnd 16
-            set_val lotserver_max_cwnd 15000
-            set_val lotserver_beta 717
-            set_val lotserver_turbo 0
-            set_val lotserver_safe_mode 1
-            set_val lotserver_fast_alpha 15
-            set_val lotserver_fast_gamma 40
-            set_val lotserver_fast_ss_exit 20
-            set_val lotserver_hd_enable 1
-            set_val lotserver_brave_enable 1
-            set_val lotserver_brave_rtt_pct 20
+            set_val hyspeed_rate 125000000
+            set_val hyspeed_min_cwnd 16
+            set_val hyspeed_max_cwnd 15000
+            set_val hyspeed_beta 717
+            set_val hyspeed_turbo 0
+            set_val hyspeed_safe_mode 1
+            set_val hyspeed_fast_alpha 15
+            set_val hyspeed_fast_gamma 40
+            set_val hyspeed_fast_ss_exit 20
+            set_val hyspeed_hd_enable 1
+            set_val hyspeed_brave_enable 1
+            set_val hyspeed_brave_rtt_pct 20
+            set_val hyspeed_rtt_filter_enable 1
+            set_val hyspeed_rtt_noise_pct 12
+            set_val hyspeed_rtt_trend_pct 6
             print_box_row "Applied: Conservative (1Gbps, Safe)" "left"
             ;;
         balanced)
-            set_val lotserver_rate 256000000
-            set_val lotserver_min_cwnd 16
-            set_val lotserver_max_cwnd 15000
-            set_val lotserver_beta 616
-            set_val lotserver_turbo 0
-            set_val lotserver_safe_mode 1
-            set_val lotserver_fast_alpha 20
-            set_val lotserver_fast_gamma 50
-            set_val lotserver_fast_ss_exit 25
-            set_val lotserver_hd_enable 1
-            set_val lotserver_brave_enable 1
-            set_val lotserver_brave_rtt_pct 25
+            set_val hyspeed_rate 256000000
+            set_val hyspeed_min_cwnd 16
+            set_val hyspeed_max_cwnd 15000
+            set_val hyspeed_beta 616
+            set_val hyspeed_turbo 0
+            set_val hyspeed_safe_mode 1
+            set_val hyspeed_fast_alpha 20
+            set_val hyspeed_fast_gamma 50
+            set_val hyspeed_fast_ss_exit 25
+            set_val hyspeed_hd_enable 1
+            set_val hyspeed_brave_enable 1
+            set_val hyspeed_brave_rtt_pct 25
+            set_val hyspeed_rtt_filter_enable 1
+            set_val hyspeed_rtt_noise_pct 15
+            set_val hyspeed_rtt_trend_pct 8
             print_box_row "Applied: Balanced (2.5Gbps, FAST)" "left"
             ;;
         aggressive)
-            set_val lotserver_rate 500000000
-            set_val lotserver_min_cwnd 16
-            set_val lotserver_max_cwnd 20000
-            set_val lotserver_beta 512
-            set_val lotserver_turbo 0
-            set_val lotserver_safe_mode 1
-            set_val lotserver_fast_alpha 30
-            set_val lotserver_fast_gamma 60
-            set_val lotserver_fast_ss_exit 30
-            set_val lotserver_hd_enable 1
-            set_val lotserver_hd_gamma_boost 30
-            set_val lotserver_brave_enable 1
-            set_val lotserver_brave_push_pct 12
+            set_val hyspeed_rate 500000000
+            set_val hyspeed_min_cwnd 16
+            set_val hyspeed_max_cwnd 20000
+            set_val hyspeed_beta 512
+            set_val hyspeed_turbo 0
+            set_val hyspeed_safe_mode 1
+            set_val hyspeed_fast_alpha 30
+            set_val hyspeed_fast_gamma 60
+            set_val hyspeed_fast_ss_exit 30
+            set_val hyspeed_hd_enable 1
+            set_val hyspeed_hd_gamma_boost 30
+            set_val hyspeed_brave_enable 1
+            set_val hyspeed_brave_push_pct 12
+            set_val hyspeed_rtt_filter_enable 1
+            set_val hyspeed_rtt_noise_pct 20
+            set_val hyspeed_rtt_trend_pct 10
             print_box_row "Applied: Aggressive (4Gbps, High Push)" "left"
             ;;
         *)
@@ -716,21 +820,21 @@ set_param() {
         print_box_top
         print_box_row "Parameter Set Error" "center" "${RED}"
         print_box_div
-        print_box_row "Usage: lotspeed set <parameter> <value>" "left"
-        print_box_row "Example: lotspeed set lotserver_rate 125000000" "left"
-        print_box_row "Example: lotspeed set lotserver_min_cwnd 16" "left"
-        print_box_row "Example: lotspeed set lotserver_max_cwnd 15000" "left"
-        print_box_row "Example: lotspeed set lotserver_beta 616" "left"
-        print_box_row "Example: lotspeed set lotserver_fast_alpha 20" "left"
-        print_box_row "Example: lotspeed set lotserver_fast_gamma 50" "left"
-        print_box_row "Example: lotspeed set lotserver_turbo 1/0" "left"
-        print_box_row "Example: lotspeed set lotserver_safe_mode 1/0" "left"
-        print_box_row "Example: lotspeed set lotserver_brave_enable 1/0" "left"
+        print_box_row "Usage: hyspeed set <parameter> <value>" "left"
+        print_box_row "Example: hyspeed set hyspeed_rate 125000000" "left"
+        print_box_row "Example: hyspeed set hyspeed_min_cwnd 16" "left"
+        print_box_row "Example: hyspeed set hyspeed_max_cwnd 15000" "left"
+        print_box_row "Example: hyspeed set hyspeed_beta 616" "left"
+        print_box_row "Example: hyspeed set hyspeed_fast_alpha 20" "left"
+        print_box_row "Example: hyspeed set hyspeed_fast_gamma 50" "left"
+        print_box_row "Example: hyspeed set hyspeed_turbo 1/0" "left"
+        print_box_row "Example: hyspeed set hyspeed_safe_mode 1/0" "left"
+        print_box_row "Example: hyspeed set hyspeed_brave_enable 1/0" "left"
         print_box_bottom
         exit 1
     fi
 
-    PARAM_FILE="/sys/module/lotspeed/parameters/$PARAM"
+    PARAM_FILE="/sys/module/hyspeed/parameters/$PARAM"
     if [[ -f "$PARAM_FILE" ]]; then
         echo $VALUE > $PARAM_FILE 2>/dev/null || {
              echo -e "${RED}Error setting value${NC}"; exit 1;
@@ -747,18 +851,18 @@ set_param() {
 
 case "$ACTION" in
     start)
-        modprobe lotspeed 2>/dev/null || insmod $INSTALL_DIR/lotspeed.ko
-        sysctl -w net.ipv4.tcp_congestion_control=lotspeed >/dev/null
+        modprobe hyspeed 2>/dev/null || insmod $INSTALL_DIR/hyspeed.ko
+        sysctl -w net.ipv4.tcp_congestion_control=hyspeed >/dev/null
         print_box_top "${GREEN}"
-        print_box_row "LotSpeed Started" "center" "${GREEN}"
+        print_box_row "HySpeed Started" "center" "${GREEN}"
         print_box_bottom "${GREEN}"
         ;;
     stop)
         DEFAULT_ALGO=$(get_default_congestion_control)
         sysctl -w net.ipv4.tcp_congestion_control=$DEFAULT_ALGO >/dev/null 2>&1
-        rmmod lotspeed 2>/dev/null
+        rmmod hyspeed 2>/dev/null
         print_box_top "${YELLOW}"
-        print_box_row "LotSpeed Stopped" "center" "${YELLOW}"
+        print_box_row "HySpeed Stopped" "center" "${YELLOW}"
         print_kv_row "Current Algo" "$DEFAULT_ALGO" "${YELLOW}"
         print_box_bottom "${YELLOW}"
         ;;
@@ -780,15 +884,15 @@ case "$ACTION" in
         print_box_top
         print_box_row "Kernel Logs (Last 10)" "center"
         print_box_bottom
-        dmesg | grep -i lotspeed | tail -10
+        dmesg | grep -i hyspeed | tail -10
         ;;
     monitor)
         echo -e "${CYAN}Monitoring logs (Ctrl+C to stop)...${NC}"
-        dmesg -w | grep --color=always -i lotspeed
+        dmesg -w | grep --color=always -i hyspeed
         ;;
     uninstall)
         print_box_top "${MAGENTA}"
-        print_box_row "LotSpeed v$VERSION Uninstaller" "center" "${MAGENTA}"
+        print_box_row "HySpeed v$VERSION Uninstaller" "center" "${MAGENTA}"
         print_box_div "${MAGENTA}"
 
         # 停止算法
@@ -797,7 +901,7 @@ case "$ACTION" in
         sysctl -w net.ipv4.tcp_congestion_control=$DEFAULT_ALGO >/dev/null 2>&1
 
         # 尝试卸载模块
-        if rmmod lotspeed 2>/dev/null; then
+        if rmmod hyspeed 2>/dev/null; then
             print_kv_row "Module Unload" "${GREEN}Success${NC}" "${MAGENTA}"
         else
             print_kv_row "Module Unload" "${YELLOW}In Use${NC}" "${MAGENTA}"
@@ -811,17 +915,17 @@ case "$ACTION" in
         # 删除文件
         print_box_row "Removing files..." "left" "${MAGENTA}"
         rm -rf $INSTALL_DIR
-        rm -f /etc/modules-load.d/lotspeed.conf
-        rm -f /lib/modules/$(uname -r)/kernel/net/ipv4/lotspeed.ko
+        rm -f /etc/modules-load.d/hyspeed.conf
+        rm -f /lib/modules/$(uname -r)/extra/hyspeed.ko
         depmod -a
-        sed -i '/net.ipv4.tcp_congestion_control=lotspeed/d' /etc/sysctl.conf
+        sed -i '/net.ipv4.tcp_congestion_control=hyspeed/d' /etc/sysctl.conf
 
         print_kv_row "Config Files" "${GREEN}Removed${NC}" "${MAGENTA}"
         print_kv_row "Startup Scripts" "${GREEN}Removed${NC}" "${MAGENTA}"
 
         # 最终检查 - 修复这里的对齐问题
         print_box_div "${MAGENTA}"
-        if lsmod | grep -q lotspeed; then
+        if lsmod | grep -q hyspeed; then
             # 内嵌的重启提示框
             print_box_row "" "center" "${MAGENTA}"
             print_box_row "${RED} ${NC}" "center" "${MAGENTA}"
@@ -830,44 +934,45 @@ case "$ACTION" in
             print_box_row "${RED}after system reboot.${NC}" "center" "${MAGENTA}"
             print_box_row "" "center" "${MAGENTA}"
         else
-            print_box_row "${GREEN}✅ LotSpeed Completely Uninstalled!${NC}" "center" "${MAGENTA}"
+            print_box_row "${GREEN}✅ HySpeed Completely Uninstalled!${NC}" "center" "${MAGENTA}"
         fi
         print_box_bottom "${MAGENTA}"
 
         # 删除自己
-        rm -f /usr/local/bin/lotspeed
-        rm -f /etc/lotspeed/config.conf
-        rm -f /etc/systemd/system/lotspeed-config.service
+        rm -f /usr/local/bin/hyspeed
+        rm -f /etc/hyspeed/config.conf
+        rm -f /etc/systemd/system/hyspeed-config.service
         systemctl daemon-reload 2>/dev/null || true
         ;;
     save)
-        CONFIG_DIR="/etc/lotspeed"
+        CONFIG_DIR="/etc/hyspeed"
         CONFIG_FILE="$CONFIG_DIR/config.conf"
 
         mkdir -p "$CONFIG_DIR"
 
         print_box_top "${GREEN}"
-        print_box_row "Saving LotSpeed Configuration" "center" "${GREEN}"
+        print_box_row "Saving HySpeed Configuration" "center" "${GREEN}"
         print_box_div "${GREEN}"
 
-        if [[ ! -d /sys/module/lotspeed/parameters ]]; then
+        if [[ ! -d /sys/module/hyspeed/parameters ]]; then
             print_box_row "${RED}Error: Module not loaded${NC}" "center" "${GREEN}"
             print_box_bottom "${GREEN}"
             exit 1
         fi
 
         # 保存所有参数到配置文件
-        echo "# LotSpeed Configuration" > "$CONFIG_FILE"
+        echo "# HySpeed Configuration" > "$CONFIG_FILE"
         echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')" >> "$CONFIG_FILE"
         echo "" >> "$CONFIG_FILE"
 
-        for param in lotserver_rate lotserver_min_cwnd lotserver_max_cwnd lotserver_beta \
-                     lotserver_turbo lotserver_safe_mode lotserver_fast_alpha lotserver_fast_gamma \
-                     lotserver_fast_ss_exit lotserver_hd_enable lotserver_hd_thresh_us \
-                     lotserver_hd_ref_us lotserver_hd_gamma_boost lotserver_hd_alpha_boost \
-                     lotserver_brave_enable lotserver_brave_rtt_pct lotserver_brave_hold_ms \
-                     lotserver_brave_floor_pct lotserver_brave_push_pct; do
-            param_file="/sys/module/lotspeed/parameters/$param"
+        for param in hyspeed_rate hyspeed_min_cwnd hyspeed_max_cwnd hyspeed_beta \
+                     hyspeed_turbo hyspeed_safe_mode hyspeed_fast_alpha hyspeed_fast_gamma \
+                     hyspeed_fast_ss_exit hyspeed_hd_enable hyspeed_hd_thresh_us \
+                     hyspeed_hd_ref_us hyspeed_hd_gamma_boost hyspeed_hd_alpha_boost \
+                     hyspeed_brave_enable hyspeed_brave_rtt_pct hyspeed_brave_hold_ms \
+                     hyspeed_brave_floor_pct hyspeed_brave_push_pct \
+                     hyspeed_rtt_filter_enable hyspeed_rtt_noise_pct hyspeed_rtt_trend_pct; do
+            param_file="/sys/module/hyspeed/parameters/$param"
             if [[ -f "$param_file" ]]; then
                 value=$(cat "$param_file" 2>/dev/null)
                 echo "$param=$value" >> "$CONFIG_FILE"
@@ -877,15 +982,15 @@ case "$ACTION" in
         print_kv_row "Config File" "$CONFIG_FILE" "${GREEN}"
 
         # 创建 systemd 服务以在启动时恢复配置
-        cat > /etc/systemd/system/lotspeed-config.service << 'SERVICE_EOF'
+        cat > /etc/systemd/system/hyspeed-config.service << 'SERVICE_EOF'
 [Unit]
-Description=LotSpeed Configuration Restore
+Description=HySpeed Configuration Restore
 After=network.target
-ConditionPathExists=/sys/module/lotspeed/parameters
+ConditionPathExists=/sys/module/hyspeed/parameters
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/lotspeed load
+ExecStart=/usr/local/bin/hyspeed load
 RemainAfterExit=yes
 
 [Install]
@@ -893,7 +998,7 @@ WantedBy=multi-user.target
 SERVICE_EOF
 
         systemctl daemon-reload
-        systemctl enable lotspeed-config.service 2>/dev/null
+        systemctl enable hyspeed-config.service 2>/dev/null
 
         print_kv_row "Systemd Service" "Enabled" "${GREEN}"
         print_box_div "${GREEN}"
@@ -901,20 +1006,20 @@ SERVICE_EOF
         print_box_bottom "${GREEN}"
         ;;
     load)
-        CONFIG_FILE="/etc/lotspeed/config.conf"
+        CONFIG_FILE="/etc/hyspeed/config.conf"
 
         print_box_top "${CYAN}"
-        print_box_row "Loading LotSpeed Configuration" "center" "${CYAN}"
+        print_box_row "Loading HySpeed Configuration" "center" "${CYAN}"
         print_box_div "${CYAN}"
 
         if [[ ! -f "$CONFIG_FILE" ]]; then
             print_box_row "${RED}Error: Config file not found${NC}" "center" "${CYAN}"
-            print_box_row "Run 'lotspeed save' first" "center" "${CYAN}"
+            print_box_row "Run 'hyspeed save' first" "center" "${CYAN}"
             print_box_bottom "${CYAN}"
             exit 1
         fi
 
-        if [[ ! -d /sys/module/lotspeed/parameters ]]; then
+        if [[ ! -d /sys/module/hyspeed/parameters ]]; then
             print_box_row "${RED}Error: Module not loaded${NC}" "center" "${CYAN}"
             print_box_bottom "${CYAN}"
             exit 1
@@ -927,7 +1032,7 @@ SERVICE_EOF
             [[ "$param" =~ ^#.*$ ]] && continue
             [[ -z "$param" ]] && continue
 
-            param_file="/sys/module/lotspeed/parameters/$param"
+            param_file="/sys/module/hyspeed/parameters/$param"
             if [[ -f "$param_file" ]]; then
                 echo "$value" > "$param_file" 2>/dev/null && load_count=$((load_count + 1))
             fi
@@ -938,11 +1043,11 @@ SERVICE_EOF
         ;;
     *)
         print_box_top
-        print_box_row "LotSpeed v$VERSION Management" "center"
+        print_box_row "HySpeed v$VERSION Management" "center"
         print_box_div
-        print_kv_row "start" "Start LotSpeed"
-        print_kv_row "stop" "Stop LotSpeed"
-        print_kv_row "restart" "Restart LotSpeed"
+        print_kv_row "start" "Start HySpeed"
+        print_kv_row "stop" "Stop HySpeed"
+        print_kv_row "restart" "Restart HySpeed"
         print_kv_row "status" "Check Status"
         print_kv_row "preset [name]" "Apply Preset"
         print_kv_row "set [k] [v]" "Set Parameter"
@@ -958,8 +1063,8 @@ SERVICE_EOF
 esac
 SCRIPT_EOF
 
-    chmod +x /usr/local/bin/lotspeed
-    log_success "Management script created at /usr/local/bin/lotspeed"
+    chmod +x /usr/local/bin/hyspeed
+    log_success "Management script created at /usr/local/bin/hyspeed"
 }
 
 print_kv_row() {
@@ -985,21 +1090,21 @@ print_kv_row() {
 show_info() {
     echo ""
     print_box_top "${GREEN}"
-    print_box_row "LotSpeed v$VERSION Installation Complete!" "center" "${GREEN}"
+    print_box_row "HySpeed v$VERSION Installation Complete!" "center" "${GREEN}"
     print_box_row "ML-TCP Auto-Scaling Edition" "center" "${GREEN}"
     print_box_bottom "${GREEN}"
 
     echo ""
 
     # 调用新生成的脚本显示状态
-    /usr/local/bin/lotspeed status
+    /usr/local/bin/hyspeed status
 
     echo ""
     print_box_top "${YELLOW}"
     print_box_row "Recommended Settings" "center" "${YELLOW}"
     print_box_div "${YELLOW}"
-    print_kv_row "VPS/Cloud (<=1Gbps)" "lotspeed preset conservative" "${YELLOW}"
-    print_kv_row "VPS/Cloud (>1Gbps)" "lotspeed preset balanced" "${YELLOW}"
+    print_kv_row "VPS/Cloud (<=1Gbps)" "hyspeed preset conservative" "${YELLOW}"
+    print_kv_row "VPS/Cloud (>1Gbps)" "hyspeed preset balanced" "${YELLOW}"
     print_box_bottom "${YELLOW}"
     echo ""
 }
@@ -1028,7 +1133,7 @@ main() {
 
     show_info
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] LotSpeed v$VERSION installed by $CURRENT_USER" >> /var/log/lotspeed_install.log
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] HySpeed v$VERSION installed by $CURRENT_USER" >> /var/log/hyspeed_install.log
 }
 
 main

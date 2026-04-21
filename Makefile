@@ -2,7 +2,7 @@ KERNEL_RELEASE  ?= $(shell uname -r)
 KERNEL_DIR      ?= /lib/modules/$(KERNEL_RELEASE)/build
 DKMS_TARBALL    ?= dkms.tar.gz
 TAR             ?= tar
-obj-m           += lotspeed.o
+obj-m           += hyspeed.o
 
 ccflags-y := -std=gnu99
 
@@ -10,10 +10,10 @@ ccflags-y := -std=gnu99
 ccflags-y += -Wno-declaration-after-statement
 ccflags-y += -Wno-unused-function
 
-# 检测内核版本 >= 6.11.0 时定义 LOTSPEED_NEW_CONG_CONTROL_API
+# 检测内核版本 >= 6.11.0 时定义 HYSPEED_NEW_CONG_CONTROL_API
 # 6.11+ 的 cong_control 签名变为 (sk, ack, flag, rs)
 ifeq ($(shell printf '%s\n%s\n' '6.11.0' '$(KERNEL_RELEASE)' | sort -V | head -n1),6.11.0)
-ccflags-y += -DLOTSPEED_NEW_CONG_CONTROL_API
+ccflags-y += -DHYSPEED_NEW_CONG_CONTROL_API
 endif
 
 .PHONY: all clean load unload
@@ -26,10 +26,10 @@ clean: clean-dkms.conf clean-dkms-tarball
 	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) clean
 
 load:
-	sudo insmod lotspeed.ko
+	sudo insmod hyspeed.ko
 
 unload:
-	sudo rmmod lotspeed
+	sudo rmmod hyspeed
 
 .PHONY: dkms-tarball clean-dkms-tarball clean-dkms.conf
 
@@ -41,12 +41,12 @@ dkms.conf: ./scripts/mkdkmsconf.sh .always-make
 clean-dkms.conf:
 	$(RM) dkms.conf
 
-$(DKMS_TARBALL): dkms.conf Makefile lotspeed.c
+$(DKMS_TARBALL): dkms.conf Makefile hyspeed.c
 	$(TAR) zcf $(DKMS_TARBALL) \
 		--transform 's,^,./dkms_source_tree/,' \
 		dkms.conf \
 		Makefile \
-		lotspeed.c
+		hyspeed.c
 
 dkms-tarball: $(DKMS_TARBALL)
 
