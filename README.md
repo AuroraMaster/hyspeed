@@ -151,15 +151,6 @@ dmesg -w
 
 ```
 
-
-### test youtube
-
-
-<div align=center>
-    <img src="https://github.com/AuroraMaster/hyspeed/blob/main/test1.png" width="1024" height="768" />
-</div>
-
-
 ### adaptive parameters
 
 | 参数 | 默认值 | 作用 |
@@ -231,24 +222,6 @@ fairness = (x1 + x2)^2 / (2 * (x1^2 + x2^2))
 ✅ BBRv3 风格 inflight 上下界护栏
 ✅ 可靠度门控的自适应进攻/冻结模型
 ✅ 小状态、可解释、快速收敛的在线优化器
-
-
-
-### speedtest 测试结果
-
-* 用之前
-
-![b058ec2ebdb2a095d396cea05dccf499.png](img/b058ec2ebdb2a095d396cea05dccf499.png)
-
-* 用之后
-
-![f7525becdae16659ddfd54d99efe0f66.png](img/f7525becdae16659ddfd54d99efe0f66.png)
-
-
-PAC (Proactive ACK Control) for TCP Incast Congestion
-==========================================
-
-* https://github.com/uk0/TCP-Incast/tree/zeta-tcp
 
 
 

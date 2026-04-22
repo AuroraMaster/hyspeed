@@ -39,12 +39,16 @@ jobs:
             file \
             shellcheck
 
+      - name: Prepare clang wrapper
+        if: matrix.compiler == 'clang'
+        run: chmod +x .github/scripts/kernel-clang-wrapper.sh
+
       - name: Build module
         run: |
           if [ "${{ matrix.compiler }}" = "clang" ]; then
             make KBUILD_MODPOST_WARN=1 \
-              LLVM=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-              OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+              CC="$PWD/.github/scripts/kernel-clang-wrapper.sh" \
+              HOSTCC=clang
           else
             make KBUILD_MODPOST_WARN=1
           fi
@@ -105,6 +109,10 @@ jobs:
             file \
             shellcheck
 
+      - name: Prepare clang wrapper
+        if: matrix.compiler == 'clang'
+        run: chmod +x .github/scripts/kernel-clang-wrapper.sh
+
       - name: Resolve Debian kernel headers
         id: headers
         shell: bash
@@ -127,8 +135,8 @@ jobs:
           KERNEL_RELEASE="${{ steps.headers.outputs.kernel_release }}"
           if [ "${{ matrix.compiler }}" = "clang" ]; then
             make KERNEL_DIR="$KERNEL_DIR" KERNEL_RELEASE="$KERNEL_RELEASE" KBUILD_MODPOST_WARN=1 \
-              LLVM=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-              OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+              CC="$PWD/.github/scripts/kernel-clang-wrapper.sh" \
+              HOSTCC=clang
           else
             make KERNEL_DIR="$KERNEL_DIR" KERNEL_RELEASE="$KERNEL_RELEASE" KBUILD_MODPOST_WARN=1
           fi
@@ -148,5 +156,111 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hyspeed-debian-${{ matrix.release }}-${{ matrix.compiler }}
+          path: hyspeed.ko
+          retention-days: 7
+
+  xanmod:
+    name: Debian bookworm XanMod x64v3 / ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Install git for checkout
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies and XanMod headers
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install -y \
+            build-essential \
+            bc \
+            flex \
+            bison \
+            libelf-dev \
+            libssl-dev \
+            clang \
+            lld \
+            llvm \
+            kmod \
+            file \
+            shellcheck \
+            wget \
+            gnupg
+
+          install -d -m 0755 /usr/share/keyrings
+          wget -qO- https://dl.xanmod.org/gpg.key | gpg --dearmor -o /usr/share/keyrings/xanmod-archive-keyring.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main' > /etc/apt/sources.list.d/xanmod-release.list
+          apt-get update
+
+          if apt-cache show linux-headers-x64v3-xanmod >/dev/null 2>&1; then
+            apt-get install -y linux-headers-x64v3-xanmod
+          else
+            XANMOD_HEADERS="$(apt-cache search '^linux-headers-.*x64v3-xanmod' | awk '{print $1}' | sort -V | tail -n1)"
+            if [ -z "$XANMOD_HEADERS" ]; then
+              echo "No XanMod x64v3 headers found"
+              apt-cache search 'linux-headers.*xanmod' || true
+              exit 1
+            fi
+            apt-get install -y "$XANMOD_HEADERS"
+          fi
+
+      - name: Prepare clang wrapper
+        if: matrix.compiler == 'clang'
+        run: chmod +x .github/scripts/kernel-clang-wrapper.sh
+
+      - name: Resolve XanMod kernel headers
+        id: headers
+        shell: bash
+        run: |
+          KERNEL_DIR="$(find /lib/modules -mindepth 2 -maxdepth 2 \( -type l -o -type d \) -name build | grep xanmod | sort -V | tail -n1)"
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "No XanMod kernel header build directory found"
+            find /lib/modules -maxdepth 3 -type d -print || true
+            exit 1
+          fi
+          KERNEL_RELEASE="$(basename "$(dirname "$KERNEL_DIR")")"
+          echo "kernel_dir=$KERNEL_DIR" >> "$GITHUB_OUTPUT"
+          echo "kernel_release=$KERNEL_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "Using KERNEL_DIR=$KERNEL_DIR"
+          echo "Using KERNEL_RELEASE=$KERNEL_RELEASE"
+
+      - name: Build module
+        run: |
+          KERNEL_DIR="${{ steps.headers.outputs.kernel_dir }}"
+          KERNEL_RELEASE="${{ steps.headers.outputs.kernel_release }}"
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            make KERNEL_DIR="$KERNEL_DIR" KERNEL_RELEASE="$KERNEL_RELEASE" KBUILD_MODPOST_WARN=1 \
+              CC="$PWD/.github/scripts/kernel-clang-wrapper.sh" \
+              HOSTCC=clang
+          else
+            make KERNEL_DIR="$KERNEL_DIR" KERNEL_RELEASE="$KERNEL_RELEASE" KBUILD_MODPOST_WARN=1
+          fi
+
+      - name: Verify module
+        run: |
+          test -f hyspeed.ko
+          file hyspeed.ko
+          modinfo hyspeed.ko || true
+
+      - name: Validate scripts
+        run: |
+          bash -n install.sh
+          shellcheck -S warning install.sh || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyspeed-debian-bookworm-xanmod-x64v3-${{ matrix.compiler }}
           path: hyspeed.ko
           retention-days: 7
