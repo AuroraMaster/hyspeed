@@ -6,6 +6,7 @@ for arg in "$@"; do
   case "$arg" in
     -mfunction-return=* | \
     -fconserve-stack | \
+    -fmin-function-alignment=* | \
     -mrecord-mcount | \
     -ftrivial-auto-var-init=zero | \
     -mharden-sls=* | \
