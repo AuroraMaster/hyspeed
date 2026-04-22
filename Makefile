@@ -3,6 +3,7 @@ KERNEL_DIR      ?= /lib/modules/$(KERNEL_RELEASE)/build
 DKMS_TARBALL    ?= dkms.tar.gz
 TAR             ?= tar
 obj-m           += hyspeed.o
+OBJECT_FILES_NON_STANDARD_hyspeed.o := y
 
 ccflags-y := -std=gnu99
 

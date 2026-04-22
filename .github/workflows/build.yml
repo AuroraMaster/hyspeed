@@ -50,6 +50,7 @@ jobs:
         run: |
           if [ "${{ matrix.compiler }}" = "clang" ]; then
             make KBUILD_MODPOST_WARN=1 \
+              SKIP_STACK_VALIDATION=1 \
               CC="$PWD/.github/scripts/kernel-clang-wrapper.sh" \
               HOSTCC=clang
           else
@@ -138,6 +139,7 @@ jobs:
           KERNEL_RELEASE="${{ steps.headers.outputs.kernel_release }}"
           if [ "${{ matrix.compiler }}" = "clang" ]; then
             make KERNEL_DIR="$KERNEL_DIR" KERNEL_RELEASE="$KERNEL_RELEASE" KBUILD_MODPOST_WARN=1 \
+              SKIP_STACK_VALIDATION=1 \
               CC="$PWD/.github/scripts/kernel-clang-wrapper.sh" \
               HOSTCC=clang
           else
@@ -212,7 +214,7 @@ jobs:
             apt-get install -y clang-19 lld-19 llvm-19
           fi
 
-          wget -qO /tmp/xanmod-archive.key https://dl.xanmod.org/archive.key
+          wget -qO /tmp/xanmod-archive.key https://gitlab.com/afrd.gpg
           grep -q 'BEGIN PGP PUBLIC KEY BLOCK' /tmp/xanmod-archive.key
           gpg --batch --dearmor -o /etc/apt/keyrings/xanmod-archive-keyring.gpg /tmp/xanmod-archive.key
           echo 'deb [signed-by=/etc/apt/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org bookworm main' > /etc/apt/sources.list.d/xanmod-release.list
@@ -256,6 +258,7 @@ jobs:
           KERNEL_RELEASE="${{ steps.headers.outputs.kernel_release }}"
           if [ "${{ matrix.compiler }}" = "clang" ]; then
             make KERNEL_DIR="$KERNEL_DIR" KERNEL_RELEASE="$KERNEL_RELEASE" KBUILD_MODPOST_WARN=1 \
+              SKIP_STACK_VALIDATION=1 \
               CC="$PWD/.github/scripts/kernel-clang-wrapper.sh" \
               KERNEL_CLANG=clang-19 \
               HOSTCC=clang-19 \
