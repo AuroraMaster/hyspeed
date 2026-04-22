@@ -1,105 +1,152 @@
-name: Build Kernel Module
+name: Build hyspeed kernel module
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  ubuntu:
+    name: Ubuntu ${{ matrix.release }} / ${{ matrix.compiler }}
+    runs-on: ubuntu-${{ matrix.release }}
     strategy:
       fail-fast: false
       matrix:
+        release: ["22.04", "24.04"]
         compiler: [gcc, clang]
-        kernel_version:
-          - "6.18.4" # LTS
-          - "6.18.3"
-          - "6.18.2"
-          - "6.12.8"
-          - "6.11.9"
-          - "5.15.99"
-          - "6.12.57"
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc flex bison libelf-dev libssl-dev clang lld llvm shellcheck
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            flex \
+            bison \
+            libelf-dev \
+            libssl-dev \
+            linux-headers-$(uname -r) \
+            clang \
+            lld \
+            llvm \
+            kmod \
+            file \
+            shellcheck
 
-      - name: Cache kernel source
-        uses: actions/cache@v4
-        id: cache-kernel
-        with:
-          path: ~/kernel-${{ matrix.kernel_version }}
-          key: kernel-${{ matrix.kernel_version }}-v1
-
-      - name: Download and prepare kernel ${{ matrix.kernel_version }}
-        if: steps.cache-kernel.outputs.cache-hit != 'true'
+      - name: Build module
         run: |
-          KERNEL_VERSION=${{ matrix.kernel_version }}
-          MAJOR_VERSION=$(echo $KERNEL_VERSION | cut -d. -f1)
-
-          # Download kernel source
-          if [ "$MAJOR_VERSION" = "5" ]; then
-            KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${KERNEL_VERSION}.tar.xz"
-          else
-            KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz"
-          fi
-
-          echo "Downloading kernel from: $KERNEL_URL"
-          wget -q "$KERNEL_URL" -O linux-${KERNEL_VERSION}.tar.xz
-          tar xf linux-${KERNEL_VERSION}.tar.xz
-          mv linux-${KERNEL_VERSION} ~/kernel-${KERNEL_VERSION}
-
-          # Prepare kernel headers
-          cd ~/kernel-${KERNEL_VERSION}
-          make defconfig
-          make modules_prepare
-          # Create empty Module.symvers to avoid modpost warnings
-          touch Module.symvers
-
-      - name: Build kernel module
-        run: |
-          KERNEL_VERSION=${{ matrix.kernel_version }}
-          KERNEL_DIR=~/kernel-${KERNEL_VERSION}
-
-          echo "Building for kernel $KERNEL_VERSION"
-          echo "Kernel directory: $KERNEL_DIR"
-          echo "Compiler: ${{ matrix.compiler }}"
-
-          # Use KBUILD_MODPOST_WARN=1 to turn modpost errors into warnings for CI
           if [ "${{ matrix.compiler }}" = "clang" ]; then
-            make KERNEL_DIR=$KERNEL_DIR KERNEL_RELEASE=$KERNEL_VERSION KBUILD_MODPOST_WARN=1 \
-              LLVM=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+            make KBUILD_MODPOST_WARN=1 \
+              LLVM=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+              OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
           else
-            make KERNEL_DIR=$KERNEL_DIR KERNEL_RELEASE=$KERNEL_VERSION KBUILD_MODPOST_WARN=1
+            make KBUILD_MODPOST_WARN=1
           fi
 
-      - name: Verify build output
+      - name: Verify module
         run: |
-          if [ -f hyspeed.ko ]; then
-            echo "Build successful!"
-            file hyspeed.ko
-            modinfo hyspeed.ko || true
-          else
-            echo "Build failed: hyspeed.ko not found"
-            exit 1
-          fi
+          test -f hyspeed.ko
+          file hyspeed.ko
+          modinfo hyspeed.ko || true
 
-      - name: Validate install script
+      - name: Validate scripts
         run: |
           bash -n install.sh
           shellcheck -S warning install.sh || true
 
-      - name: Upload kernel module artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hyspeed-${{ matrix.kernel_version }}-${{ matrix.compiler }}
+          name: hyspeed-ubuntu-${{ matrix.release }}-${{ matrix.compiler }}
+          path: hyspeed.ko
+          retention-days: 7
+
+  debian:
+    name: Debian ${{ matrix.release }} / ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    container:
+      image: debian:${{ matrix.release }}
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["bookworm", "trixie"]
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Install git for checkout
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            build-essential \
+            bc \
+            flex \
+            bison \
+            libelf-dev \
+            libssl-dev \
+            linux-headers-amd64 \
+            clang \
+            lld \
+            llvm \
+            kmod \
+            file \
+            shellcheck
+
+      - name: Resolve Debian kernel headers
+        id: headers
+        shell: bash
+        run: |
+          KERNEL_DIR="$(find /lib/modules -mindepth 2 -maxdepth 2 \( -type l -o -type d \) -name build | sort -V | tail -n1)"
+          if [ -z "$KERNEL_DIR" ]; then
+            echo "No Debian kernel header build directory found"
+            find /lib/modules -maxdepth 3 -type d -print || true
+            exit 1
+          fi
+          KERNEL_RELEASE="$(basename "$(dirname "$KERNEL_DIR")")"
+          echo "kernel_dir=$KERNEL_DIR" >> "$GITHUB_OUTPUT"
+          echo "kernel_release=$KERNEL_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "Using KERNEL_DIR=$KERNEL_DIR"
+          echo "Using KERNEL_RELEASE=$KERNEL_RELEASE"
+
+      - name: Build module
+        run: |
+          KERNEL_DIR="${{ steps.headers.outputs.kernel_dir }}"
+          KERNEL_RELEASE="${{ steps.headers.outputs.kernel_release }}"
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            make KERNEL_DIR="$KERNEL_DIR" KERNEL_RELEASE="$KERNEL_RELEASE" KBUILD_MODPOST_WARN=1 \
+              LLVM=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+              OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+          else
+            make KERNEL_DIR="$KERNEL_DIR" KERNEL_RELEASE="$KERNEL_RELEASE" KBUILD_MODPOST_WARN=1
+          fi
+
+      - name: Verify module
+        run: |
+          test -f hyspeed.ko
+          file hyspeed.ko
+          modinfo hyspeed.ko || true
+
+      - name: Validate scripts
+        run: |
+          bash -n install.sh
+          shellcheck -S warning install.sh || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyspeed-debian-${{ matrix.release }}-${{ matrix.compiler }}
           path: hyspeed.ko
           retention-days: 7

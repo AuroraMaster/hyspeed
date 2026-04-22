@@ -78,6 +78,23 @@ static unsigned int hyspeed_brave_push_pct = 8;     // 正常时目标窗口额�
 static bool hyspeed_rtt_filter_enable = true;
 static unsigned int hyspeed_rtt_noise_pct = 15;     // RTT 偏差超过 base RTT 的百分比时视为噪声较高
 static unsigned int hyspeed_rtt_trend_pct = 8;      // 短期 RTT 高于长期 RTT 的百分比，视为真实排队趋势
+// 多信号可靠度门控：借鉴 BBRv3 上下界和 Polar 式可靠/冻结思想
+static bool hyspeed_adaptive_enable = true;
+static unsigned int hyspeed_attack_push_pct = 10;   // 可靠状态下的额外目标窗口提升
+static unsigned int hyspeed_attack_max_pct = 25;    // 可靠度门控后的最大进攻提升
+static unsigned int hyspeed_probe_gain_pct = 115;   // 可靠状态下 pacing 探测增益
+static unsigned int hyspeed_loss_guard_pct = 5;     // 超过该丢包 EWMA 后进入硬护栏
+static unsigned int hyspeed_queue_guard_pct = 70;   // 持续队列膨胀护栏（相对 base RTT 百分比）
+static unsigned int hyspeed_reliability_floor_pct = 35; // 低于该可靠度时冻结进攻增益
+static unsigned int hyspeed_inflight_headroom_pct = 15; // 拥塞后 inflight_hi 预留空间
+// 轻量在线优化器：每个 RTT 级别微调 attack/probe，保持可解释和有界
+static bool hyspeed_optimizer_enable = true;
+static unsigned int hyspeed_opt_interval_rtts = 2;  // 每 N 个 RTT 评估一次
+static unsigned int hyspeed_opt_step_pct = 1;       // 单次增减步长
+static unsigned int hyspeed_opt_max_attack_pct = 30;// 在线 attack 上限
+static unsigned int hyspeed_opt_max_probe_pct = 130;// 在线 probe 上限
+static unsigned int hyspeed_opt_queue_weight = 2;   // 队列代价权重
+static unsigned int hyspeed_opt_loss_weight = 12;   // 丢包代价权重
 
 // 参数校验
 static int param_set_min_cwnd(const char *val, const struct kernel_param *kp)
@@ -130,6 +147,17 @@ static int param_set_percent_100(const char *val, const struct kernel_param *kp)
     return ret;
 }
 
+static int param_set_percent_200(const char *val, const struct kernel_param *kp)
+{
+    int ret = param_set_uint(val, kp);
+    if (!ret) {
+        unsigned int *p = (unsigned int *)kp->arg;
+        if (*p < 1) *p = 1;
+        if (*p > 200) *p = 200;
+    }
+    return ret;
+}
+
 static int param_set_usec(const char *val, const struct kernel_param *kp)
 {
     int ret = param_set_uint(val, kp);
@@ -152,14 +180,27 @@ static int param_set_msec(const char *val, const struct kernel_param *kp)
     return ret;
 }
 
+static int param_set_small_uint(const char *val, const struct kernel_param *kp)
+{
+    int ret = param_set_uint(val, kp);
+    if (!ret) {
+        unsigned int *p = (unsigned int *)kp->arg;
+        if (*p < 1) *p = 1;
+        if (*p > 64) *p = 64;
+    }
+    return ret;
+}
+
 static const struct kernel_param_ops param_ops_rate = { .set = param_set_ulong, .get = param_get_ulong, };
 static const struct kernel_param_ops param_ops_min_cwnd = { .set = param_set_min_cwnd, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_max_cwnd = { .set = param_set_max_cwnd, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_beta = { .set = param_set_beta, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_alpha = { .set = param_set_alpha, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_percent_100 = { .set = param_set_percent_100, .get = param_get_uint, };
+static const struct kernel_param_ops param_ops_percent_200 = { .set = param_set_percent_200, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_usec = { .set = param_set_usec, .get = param_get_uint, };
 static const struct kernel_param_ops param_ops_msec = { .set = param_set_msec, .get = param_get_uint, };
+static const struct kernel_param_ops param_ops_small_uint = { .set = param_set_small_uint, .get = param_get_uint, };
 
 module_param_cb(hyspeed_rate, &param_ops_rate, &hyspeed_rate, 0644);
 module_param_cb(hyspeed_min_cwnd, &param_ops_min_cwnd, &hyspeed_min_cwnd, 0644);
@@ -187,6 +228,21 @@ module_param_cb(hyspeed_brave_push_pct, &param_ops_percent_100, &hyspeed_brave_p
 module_param(hyspeed_rtt_filter_enable, bool, 0644);
 module_param_cb(hyspeed_rtt_noise_pct, &param_ops_percent_100, &hyspeed_rtt_noise_pct, 0644);
 module_param_cb(hyspeed_rtt_trend_pct, &param_ops_percent_100, &hyspeed_rtt_trend_pct, 0644);
+module_param(hyspeed_adaptive_enable, bool, 0644);
+module_param_cb(hyspeed_attack_push_pct, &param_ops_percent_100, &hyspeed_attack_push_pct, 0644);
+module_param_cb(hyspeed_attack_max_pct, &param_ops_percent_100, &hyspeed_attack_max_pct, 0644);
+module_param_cb(hyspeed_probe_gain_pct, &param_ops_percent_200, &hyspeed_probe_gain_pct, 0644);
+module_param_cb(hyspeed_loss_guard_pct, &param_ops_percent_100, &hyspeed_loss_guard_pct, 0644);
+module_param_cb(hyspeed_queue_guard_pct, &param_ops_percent_100, &hyspeed_queue_guard_pct, 0644);
+module_param_cb(hyspeed_reliability_floor_pct, &param_ops_percent_100, &hyspeed_reliability_floor_pct, 0644);
+module_param_cb(hyspeed_inflight_headroom_pct, &param_ops_percent_100, &hyspeed_inflight_headroom_pct, 0644);
+module_param(hyspeed_optimizer_enable, bool, 0644);
+module_param_cb(hyspeed_opt_interval_rtts, &param_ops_small_uint, &hyspeed_opt_interval_rtts, 0644);
+module_param_cb(hyspeed_opt_step_pct, &param_ops_percent_100, &hyspeed_opt_step_pct, 0644);
+module_param_cb(hyspeed_opt_max_attack_pct, &param_ops_percent_100, &hyspeed_opt_max_attack_pct, 0644);
+module_param_cb(hyspeed_opt_max_probe_pct, &param_ops_percent_200, &hyspeed_opt_max_probe_pct, 0644);
+module_param_cb(hyspeed_opt_queue_weight, &param_ops_small_uint, &hyspeed_opt_queue_weight, 0644);
+module_param_cb(hyspeed_opt_loss_weight, &param_ops_small_uint, &hyspeed_opt_loss_weight, 0644);
 
 // --- 状态机 ---
 enum hyspeed_state {
@@ -197,10 +253,21 @@ enum hyspeed_state {
 
 struct hyspeed {
     u64 pacing_rate;      // 上次计算的 pacing 速率
+    u64 bw_ewma;          // delivered-rate EWMA（bytes/sec）
+    u64 bw_peak;          // 近期带宽上界（bytes/sec，慢衰减）
     u32 rtt_min;          // 基准 RTT（usec）
     u32 rtt_short;        // 短周期 RTT EWMA（usec）
     u32 rtt_long;         // 长周期 RTT EWMA（usec）
     u32 rtt_dev;          // RTT 偏差 EWMA（usec）
+    u32 loss_ewma_pct;    // 丢包 EWMA（百分比）
+    u32 reliability_pct;  // 链路观测可靠度（0..100）
+    u32 inflight_hi;      // BBRv3 风格长期安全 inflight 上界（packets）
+    u32 inflight_lo;      // 短期拥塞下界/护栏（packets）
+    u32 opt_rounds;       // 在线优化器 RTT 计数
+    u32 opt_bw_ref;       // 上次评估带宽（KB/s，避免 u64 状态膨胀）
+    u32 opt_attack_pct;   // 在线优化后的 attack 增益
+    u32 opt_probe_pct;    // 在线优化后的 probe 增益
+    s32 opt_score;        // 最近一次可解释优化分数
     u32 last_state_ts;    // 状态切换时间戳（jiffies32）
     u32 probe_rtt_ts;     // 上次探测 RTT（jiffies32）
     u32 brave_hold_cwnd;  // 勇敢模式冻结时的窗口基线
@@ -256,6 +323,193 @@ static u32 hyspeed_abs_diff_u32(u32 a, u32 b)
 static u32 hyspeed_max3_u32(u32 a, u32 b, u32 c)
 {
     return max(max(a, b), c);
+}
+
+static u32 hyspeed_pct_over_base(u32 value, u32 base)
+{
+    if (!base || value <= base)
+        return 0;
+    return (u32)min_t(u64, SAFE_DIV64((u64)(value - base) * 100, base), 1000);
+}
+
+static u32 hyspeed_bound_reliability(s32 score)
+{
+    if (score < 0)
+        return 0;
+    if (score > 100)
+        return 100;
+    return (u32)score;
+}
+
+static u32 hyspeed_clamp_pct(u32 value, u32 lo, u32 hi)
+{
+    if (hi < lo)
+        hi = lo;
+    return clamp_t(u32, value, lo, hi);
+}
+
+/*
+ * Low-state online optimizer. It is a bounded hill-climber over two knobs:
+ * attack percentage and probe pacing gain. The score is deliberately simple:
+ * bandwidth gain minus queue/loss penalties. Updates happen every few RTTs,
+ * never allocate memory, and only move by hyspeed_opt_step_pct.
+ */
+static void hyspeed_run_optimizer(struct hyspeed *ca, u32 queue_pct, bool hard_guard)
+{
+    u32 bw_kbps;
+    s32 bw_gain = 0;
+    s32 penalty;
+    s32 score;
+    u32 step;
+    u32 attack_hi;
+    u32 probe_hi;
+
+    if (!hyspeed_optimizer_enable || !ca)
+        return;
+
+    if (!ca->opt_attack_pct)
+        ca->opt_attack_pct = min(hyspeed_attack_push_pct, hyspeed_opt_max_attack_pct);
+    if (!ca->opt_probe_pct)
+        ca->opt_probe_pct = clamp_t(u32, hyspeed_probe_gain_pct, 100, hyspeed_opt_max_probe_pct);
+
+    if (++ca->opt_rounds < hyspeed_opt_interval_rtts)
+        return;
+    ca->opt_rounds = 0;
+
+    bw_kbps = ca->bw_ewma ? (u32)min_t(u64, SAFE_DIV64(ca->bw_ewma, 1024), (u64)U32_MAX) : 0;
+    if (ca->opt_bw_ref && bw_kbps)
+        bw_gain = (s32)clamp_t(u32, hyspeed_pct_over_base(bw_kbps, ca->opt_bw_ref), 0, 100);
+
+    penalty = (s32)min_t(u32, queue_pct * hyspeed_opt_queue_weight, 200) +
+              (s32)min_t(u32, ca->loss_ewma_pct * hyspeed_opt_loss_weight, 200);
+    score = bw_gain - penalty;
+    ca->opt_score = score;
+
+    step = max_t(u32, hyspeed_opt_step_pct, 1);
+    attack_hi = min(hyspeed_attack_max_pct, hyspeed_opt_max_attack_pct);
+    probe_hi = hyspeed_clamp_pct(hyspeed_opt_max_probe_pct, 100, 200);
+
+    if (hard_guard || ca->reliability_pct < hyspeed_reliability_floor_pct || score < -10) {
+        ca->opt_attack_pct = ca->opt_attack_pct > step ? ca->opt_attack_pct - step : 0;
+        ca->opt_probe_pct = ca->opt_probe_pct > 100 + step ? ca->opt_probe_pct - step : 100;
+    } else if (score > 0 && ca->reliability_pct >= 70) {
+        ca->opt_attack_pct = min_t(u32, ca->opt_attack_pct + step, attack_hi);
+        ca->opt_probe_pct = min_t(u32, ca->opt_probe_pct + step, probe_hi);
+    }
+
+    ca->opt_attack_pct = hyspeed_clamp_pct(ca->opt_attack_pct, 0, attack_hi);
+    ca->opt_probe_pct = hyspeed_clamp_pct(ca->opt_probe_pct, 100, probe_hi);
+
+    if (bw_kbps)
+        ca->opt_bw_ref = ca->opt_bw_ref ? ((ca->opt_bw_ref * 7 + bw_kbps) >> 3) : bw_kbps;
+}
+
+/*
+ * Multi-signal reliability gate:
+ *   - RTT trend/queue identify persistent congestion.
+ *   - RTT noise spikes are not treated as real congestion, but cap aggression.
+ *   - loss EWMA and inflight_hi/inflight_lo provide BBRv3-like hard guards.
+ */
+static u32 hyspeed_update_reliability(struct sock *sk, const struct rate_sample *rs,
+                                      u32 base_rtt, u32 control_rtt, u32 mss,
+                                      bool noise_spike, bool *hard_guard,
+                                      u32 *attack_pct, u32 *probe_gain_pct)
+{
+    struct tcp_sock *tp = tcp_sk(sk);
+    struct hyspeed *ca = inet_csk_ca(sk);
+    u32 queue_pct = hyspeed_pct_over_base(control_rtt, base_rtt);
+    u32 trend_pct = 0;
+    u32 dev_pct = 0;
+    u32 loss_sample_pct = 0;
+    u32 pipe = tcp_packets_in_flight(tp);
+    u32 inflight = max(pipe, tp->snd_cwnd);
+    s32 score = 100;
+
+    SAFETY_CHECK(tp && ca, 100);
+
+    if (ca->rtt_short > ca->rtt_long && base_rtt)
+        trend_pct = (u32)min_t(u64, SAFE_DIV64((u64)(ca->rtt_short - ca->rtt_long) * 100, base_rtt), 1000);
+    if (ca->rtt_dev && base_rtt)
+        dev_pct = (u32)min_t(u64, SAFE_DIV64((u64)ca->rtt_dev * 100, base_rtt), 1000);
+
+    if (rs) {
+        u32 delivered = rs->delivered > 0 ? (u32)rs->delivered : 0;
+        u32 losses = rs->losses > 0 ? (u32)rs->losses : 0;
+        if (losses || delivered)
+            loss_sample_pct = (u32)min_t(u64, SAFE_DIV64((u64)losses * 100, losses + delivered), 100);
+
+        if (delivered > 0 && rs->interval_us > 0 && mss > 0) {
+            u64 sample_bw = (u64)delivered * mss;
+            sample_bw = SAFE_DIV64(sample_bw * USEC_PER_SEC, rs->interval_us);
+            ca->bw_ewma = ca->bw_ewma ? SAFE_DIV64(ca->bw_ewma * 7 + sample_bw, 8) : sample_bw;
+            if (sample_bw > ca->bw_peak)
+                ca->bw_peak = sample_bw;
+            else if (ca->bw_peak)
+                ca->bw_peak = max(sample_bw, SAFE_DIV64(ca->bw_peak * 255, 256));
+        }
+    }
+
+    ca->loss_ewma_pct = (ca->loss_ewma_pct * 7 + loss_sample_pct) >> 3;
+
+    if (!noise_spike)
+        score -= min_t(u32, queue_pct / 2, 45);
+    score -= min_t(u32, trend_pct, 35);
+    score -= min_t(u32, dev_pct, 30);
+    score -= min_t(u32, ca->loss_ewma_pct * 8, 70);
+
+    if (ca->bw_peak && ca->bw_ewma &&
+        ca->bw_ewma * 100 < ca->bw_peak * 75 &&
+        (queue_pct > hyspeed_fast_ss_exit || ca->loss_ewma_pct > 0))
+        score -= 15;
+
+    if (noise_spike && score > 70)
+        score = 70;
+
+    ca->reliability_pct = hyspeed_bound_reliability(score);
+
+    if (!ca->inflight_hi)
+        ca->inflight_hi = clamp_t(u32, inflight, hyspeed_min_cwnd, hyspeed_max_cwnd);
+    if (!ca->inflight_lo)
+        ca->inflight_lo = ca->inflight_hi;
+
+    *hard_guard = ca->loss_ewma_pct >= hyspeed_loss_guard_pct ||
+                  (!noise_spike && queue_pct >= hyspeed_queue_guard_pct);
+
+    if (*hard_guard) {
+        u32 cut = 100 - min_t(u32, hyspeed_inflight_headroom_pct, 90);
+        u32 hi = (ca->inflight_hi * cut) / 100;
+        ca->inflight_hi = clamp_t(u32, max_t(u32, hi, inflight), hyspeed_min_cwnd, hyspeed_max_cwnd);
+        ca->inflight_lo = clamp_t(u32, max_t(u32, pipe + 1, (tp->snd_cwnd * cut) / 100),
+                                  hyspeed_min_cwnd, hyspeed_max_cwnd);
+    } else if (ca->reliability_pct >= hyspeed_reliability_floor_pct) {
+        u32 acked = (rs && rs->acked_sacked > 0) ? (u32)rs->acked_sacked : 1;
+        if (inflight + 1 >= ca->inflight_hi)
+            ca->inflight_hi = min_t(u32, hyspeed_max_cwnd, ca->inflight_hi + max_t(u32, 1, acked >> 2));
+        ca->inflight_lo = max(ca->inflight_lo, min(ca->inflight_hi, inflight));
+    }
+
+    if (ca->reliability_pct < hyspeed_reliability_floor_pct) {
+        *attack_pct = 0;
+        *probe_gain_pct = 100;
+    } else {
+        u32 gated = (hyspeed_attack_push_pct * ca->reliability_pct) / 100;
+        *attack_pct = min(gated, hyspeed_attack_max_pct);
+        *probe_gain_pct = 100 + ((hyspeed_probe_gain_pct - 100) * ca->reliability_pct) / 100;
+    }
+
+    if (*hard_guard) {
+        *attack_pct = 0;
+        *probe_gain_pct = 100;
+    }
+
+    hyspeed_run_optimizer(ca, queue_pct, *hard_guard);
+    if (hyspeed_optimizer_enable && !*hard_guard &&
+        ca->reliability_pct >= hyspeed_reliability_floor_pct) {
+        *attack_pct = min(*attack_pct, ca->opt_attack_pct);
+        *probe_gain_pct = min(*probe_gain_pct, ca->opt_probe_pct);
+    }
+
+    return ca->reliability_pct;
 }
 
 /*
@@ -462,6 +716,10 @@ static void hyspeed_adapt_and_control(struct sock *sk, const struct rate_sample 
     u32 hist_alpha = 0;
     bool brave_active = false;
     bool rtt_noise_spike = false;
+    bool hard_guard = false;
+    u32 attack_pct = 0;
+    u32 probe_gain_pct = 100;
+    u32 reliability_pct = 100;
     u32 now_jif = tcp_jiffies32;
 
     SAFETY_CHECK(tp && ca, );
@@ -496,6 +754,12 @@ static void hyspeed_adapt_and_control(struct sock *sk, const struct rate_sample 
         control_rtt_us = rtt_us;
     high_delay_path = hyspeed_hd_enable && base_rtt >= hyspeed_hd_thresh_us;
     brave_active = hyspeed_brave_enable && time_before((unsigned long)now_jif, (unsigned long)ca->brave_freeze_until);
+    if (hyspeed_adaptive_enable)
+        reliability_pct = hyspeed_update_reliability(sk, rs, base_rtt, control_rtt_us, mss,
+                                                     rtt_noise_spike, &hard_guard,
+                                                     &attack_pct, &probe_gain_pct);
+    else
+        ca->reliability_pct = reliability_pct;
 
     // 定期进入 PROBE_RTT 刷新基准 RTT
     if (ca->state != PROBE_RTT &&
@@ -536,6 +800,8 @@ static void hyspeed_adapt_and_control(struct sock *sk, const struct rate_sample 
             enter_state(sk, FAST_CA);
         }
 
+        if (hard_guard && cwnd > ca->inflight_lo)
+            cwnd = ca->inflight_lo;
         tp->snd_cwnd = clamp(cwnd, hyspeed_min_cwnd, hyspeed_max_cwnd);
         goto out_pacing;
     }
@@ -557,11 +823,20 @@ static void hyspeed_adapt_and_control(struct sock *sk, const struct rate_sample 
             gamma = min_t(u64, gamma + hyspeed_hd_gamma_boost, FAST_GAMMA_SCALE);
         }
 
+        if (hyspeed_adaptive_enable && attack_pct > 0) {
+            u32 hd_bonus = 0;
+            if (high_delay_path && base_rtt > hyspeed_hd_ref_us && hyspeed_hd_ref_us)
+                hd_bonus = min_t(u32, (base_rtt - hyspeed_hd_ref_us) / hyspeed_hd_ref_us, 3) * 2;
+            attack_pct = min_t(u32, attack_pct + hd_bonus, hyspeed_attack_max_pct);
+            cwnd_target = min_t(u64, cwnd_target * (100 + attack_pct) / 100, (u64)HYSPEED_MAX_U32);
+        }
+
         cwnd = (u32)SAFE_DIV64((u64)tp->snd_cwnd * (FAST_GAMMA_SCALE - gamma) +
                                cwnd_target * gamma, FAST_GAMMA_SCALE);
 
         // 正常路径额外 push（勇敢模型），仅在非抖动时
         if (hyspeed_brave_enable && !brave_active &&
+            !hard_guard &&
             !rtt_noise_spike &&
             control_rtt_us <= base_rtt + (base_rtt * hyspeed_fast_ss_exit) / 100) {
             u64 pushed = (u64)cwnd * (100 + hyspeed_brave_push_pct) / 100;
@@ -574,6 +849,15 @@ static void hyspeed_adapt_and_control(struct sock *sk, const struct rate_sample 
     pipe = tcp_packets_in_flight(tp);
     if (pipe > 0 && cwnd < pipe + 1)
         cwnd = pipe + 1; // RFC3517 风格：确保cwnd不小于在途数据量，避免停顿
+
+    if (hyspeed_adaptive_enable && ca->inflight_hi) {
+        u32 cap = ca->inflight_hi;
+        if (hard_guard && ca->inflight_lo)
+            cap = min(cap, ca->inflight_lo);
+        cap = max_t(u32, cap, pipe + 1);
+        if (cwnd > cap)
+            cwnd = cap;
+    }
 
     if (brave_active && ca->brave_hold_cwnd) {
         u32 floor = (ca->brave_hold_cwnd * hyspeed_brave_floor_pct) / 100;
@@ -592,6 +876,8 @@ out_pacing:
             // 高延迟路径给予轻微 pacing 提升，改善管道填充速度
             rate = rate * (100 + hyspeed_hd_gamma_boost / 2) / 100;
         }
+        if (hyspeed_adaptive_enable && probe_gain_pct > 100)
+            rate = rate * probe_gain_pct / 100;
         if (brave_active && ca->pacing_rate > 0 && rate < ca->pacing_rate)
             rate = ca->pacing_rate; // 冻结期间保持原速
         if (rate > hyspeed_rate)
